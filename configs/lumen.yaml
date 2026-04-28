@@ -1,0 +1,131 @@
+global_plugins:
+  - name: response_transformer
+    params:
+      add:
+        headers:
+          X-Lumen-Global: "true"
+
+plugins:
+  mark-json:
+    name: response_transformer
+    params:
+      set:
+        headers:
+          X-Lumen-Plugin: "mark-json"
+
+servers:
+  main:
+    listen: ":8080"
+    plugins:
+      - name: request_transformer
+        params:
+          add:
+            headers:
+              X-Lumen-Server: main
+
+routes:
+  user-api:
+    methods: ["GET"]
+    paths:
+      - "/api/users"
+    service: user-service
+    plugins:
+      - name: strip_prefix
+        params:
+          prefix: "/api"
+      - name: request_transformer
+        params:
+          host: "users.internal"
+          set:
+            headers:
+              X-Lumen-Route: user-api
+            query:
+              matched_route: user-api
+      - name: response_transformer
+        params:
+          status: 200
+          body: '{"route":"user-api"}'
+          content_type: application/json
+
+  order-api:
+    methods: ["GET"]
+    paths:
+      - "/api/orders"
+    service: user-service
+    plugins:
+      - name: request_transformer
+        params:
+          host: "orders.internal"
+          set:
+            headers:
+              X-Lumen-Route: order-api
+            query:
+              matched_route: order-api
+      - name: response_transformer
+        params:
+          status: 200
+          body: '{"route":"order-api"}'
+          content_type: application/json
+
+  payment-api:
+    methods: ["POST"]
+    paths:
+      - "/api/payments"
+    service: user-service
+    plugins:
+      - name: request_transformer
+        params:
+          host: "payments.internal"
+          set:
+            headers:
+              X-Lumen-Route: payment-api
+            query:
+              matched_route: payment-api
+      - name: response_transformer
+        params:
+          status: 200
+          body: '{"route":"payment-api"}'
+          content_type: application/json
+
+  health-check:
+    methods: ["GET"]
+    paths:
+      - "= /health"
+    service: user-service
+    plugins:
+      - name: response_transformer
+        params:
+          status: 200
+          body: '{"route":"health-check"}'
+          content_type: application/json
+
+services:
+  user-service:
+    protocol: http
+    upstream: user-upstream
+    timeout:
+      connect: 1s
+      read: 3s
+      write: 3s
+    plugins:
+      - use: mark-json
+
+upstreams:
+  user-upstream:
+    balancer:
+      type: round_robin
+    health_check:
+      passive:
+        max_fails: 3
+        fail_timeout: 30s
+    endpoints:
+      - address: "127.0.0.1:9001"
+        weight: 1
+      - address: "127.0.0.1:9002"
+        weight: 1
+    plugins:
+      - name: request_transformer
+        params:
+          add:
+            query:
+              upstream: user-upstream
