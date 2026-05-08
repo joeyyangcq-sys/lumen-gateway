@@ -31,13 +31,13 @@ type ServerOptions struct {
 }
 
 type RouteOptions struct {
-	ID      string      `yaml:"-"`
-	Hosts   []string    `yaml:"hosts"`
-	Methods []string    `yaml:"methods"`
-	Paths   []string    `yaml:"paths"`
-	Priority int        `yaml:"priority"`
-	Service string      `yaml:"service"`
-	Plugins []PluginRef `yaml:"plugins"`
+	ID       string      `yaml:"-"`
+	Hosts    []string    `yaml:"hosts"`
+	Methods  []string    `yaml:"methods"`
+	Paths    []string    `yaml:"paths"`
+	Priority int         `yaml:"priority"`
+	Service  string      `yaml:"service"`
+	Plugins  []PluginRef `yaml:"plugins"`
 }
 
 type ServiceOptions struct {
@@ -55,11 +55,14 @@ type TimeoutOptions struct {
 }
 
 type UpstreamOptions struct {
-	ID          string             `yaml:"-"`
-	Balancer    BalancerOptions    `yaml:"balancer"`
-	HealthCheck HealthCheckOptions `yaml:"health_check"`
-	Endpoints   []EndpointOptions  `yaml:"endpoints"`
-	Plugins     []PluginRef        `yaml:"plugins"`
+	ID           string             `yaml:"-"`
+	Balancer     BalancerOptions    `yaml:"balancer"`
+	HealthCheck  HealthCheckOptions `yaml:"health_check"`
+	Scheme       string             `yaml:"scheme"`
+	PassHost     string             `yaml:"pass_host"`
+	UpstreamHost string             `yaml:"upstream_host"`
+	Endpoints    []EndpointOptions  `yaml:"endpoints"`
+	Plugins      []PluginRef        `yaml:"plugins"`
 }
 
 type BalancerOptions struct {
@@ -197,6 +200,19 @@ func (o Options) Validate() error {
 	for id, upstream := range o.Upstreams {
 		if len(upstream.Endpoints) == 0 {
 			return fmt.Errorf("upstream %q endpoints cannot be empty", id)
+		}
+		switch upstream.Scheme {
+		case "", "http", "https":
+		default:
+			return fmt.Errorf("upstream %q scheme %q is not supported", id, upstream.Scheme)
+		}
+		switch upstream.PassHost {
+		case "", "pass", "node", "rewrite":
+		default:
+			return fmt.Errorf("upstream %q pass_host %q is not supported", id, upstream.PassHost)
+		}
+		if upstream.PassHost == "rewrite" && upstream.UpstreamHost == "" {
+			return fmt.Errorf("upstream %q upstream_host cannot be empty when pass_host=rewrite", id)
 		}
 		for _, endpoint := range upstream.Endpoints {
 			if endpoint.Address == "" {

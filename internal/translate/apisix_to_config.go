@@ -163,8 +163,11 @@ func apisixUpstreamToConfig(up apisix.Upstream) (config.UpstreamOptions, error) 
 	}
 
 	return config.UpstreamOptions{
-		ID:        id,
-		Endpoints: endpoints,
+		ID:           id,
+		Scheme:       up.Scheme,
+		PassHost:     up.PassHost,
+		UpstreamHost: up.UpstreamHost,
+		Endpoints:    endpoints,
 	}, nil
 }
 
@@ -285,4 +288,3 @@ func apisixWildcardToRegex(uri string) string {
 	s = strings.Join(parts, "/")
 	return "^" + s + "$"
 }
-

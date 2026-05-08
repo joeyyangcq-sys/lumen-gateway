@@ -43,6 +43,36 @@ func TestValidateRejectsUnknownPluginReference(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsUnsupportedUpstreamScheme(t *testing.T) {
+	options := minimalOptions()
+	upstream := options.Upstreams["user-upstream"]
+	upstream.Scheme = "grpc"
+	options.Upstreams["user-upstream"] = upstream
+
+	err := options.Validate()
+	if err == nil {
+		t.Fatal("Validate() error = nil, want scheme validation error")
+	}
+	if !strings.Contains(err.Error(), `scheme "grpc" is not supported`) {
+		t.Fatalf("Validate() error = %q, want scheme validation error", err.Error())
+	}
+}
+
+func TestValidateRejectsRewritePassHostWithoutUpstreamHost(t *testing.T) {
+	options := minimalOptions()
+	upstream := options.Upstreams["user-upstream"]
+	upstream.PassHost = "rewrite"
+	options.Upstreams["user-upstream"] = upstream
+
+	err := options.Validate()
+	if err == nil {
+		t.Fatal("Validate() error = nil, want upstream_host validation error")
+	}
+	if !strings.Contains(err.Error(), `upstream_host cannot be empty`) {
+		t.Fatalf("Validate() error = %q, want upstream_host validation error", err.Error())
+	}
+}
+
 func minimalOptions() Options {
 	return Options{
 		Servers: map[string]ServerOptions{

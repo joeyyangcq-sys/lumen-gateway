@@ -5,13 +5,17 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"sync/atomic"
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/app/server"
+	"github.com/joey/lumen-gateway/internal/balancer"
+	"github.com/joey/lumen-gateway/internal/balancer/roundrobin"
 	"github.com/joey/lumen-gateway/internal/config"
 	"github.com/joey/lumen-gateway/internal/plugin"
 	"github.com/joey/lumen-gateway/internal/plugin/builtin"
+	"github.com/joey/lumen-gateway/internal/proxy"
 	"github.com/joey/lumen-gateway/internal/router"
 )
 
@@ -35,6 +39,7 @@ type Service struct {
 	Options  config.ServiceOptions
 	Handlers []app.HandlerFunc
 	Upstream *Upstream
+	Proxy    proxy.Proxy
 }
 
 type Upstream struct {
@@ -42,12 +47,26 @@ type Upstream struct {
 	Options   config.UpstreamOptions
 	Handlers  []app.HandlerFunc
 	Endpoints []*Endpoint
+	Balancer  balancer.Balancer
 }
 
 type Endpoint struct {
-	Address string
-	Weight  uint32
-	Tags    map[string]string
+	Addr      string
+	Load      uint32
+	Tags      map[string]string
+	Available bool
+}
+
+func (e *Endpoint) Address() string {
+	return e.Addr
+}
+
+func (e *Endpoint) Weight() uint32 {
+	return e.Load
+}
+
+func (e *Endpoint) IsAvailable() bool {
+	return e.Available
 }
 
 func New(options config.Options) (*Gateway, error) {
@@ -117,7 +136,7 @@ func (g *Gateway) ServeHTTP(ctx context.Context, c *app.RequestContext) {
 	handlers = append(handlers, snapshot.RouteHandlers[route.ID]...)
 	handlers = append(handlers, func(nextCtx context.Context, next *app.RequestContext) {
 		service := snapshot.Services[route.Service]
-		if service == nil || service.Upstream == nil {
+		if service == nil || service.Upstream == nil || service.Proxy == nil {
 			next.SetStatusCode(503)
 			return
 		}
@@ -125,16 +144,23 @@ func (g *Gateway) ServeHTTP(ctx context.Context, c *app.RequestContext) {
 		serviceHandlers = append(serviceHandlers, service.Handlers...)
 		serviceHandlers = append(serviceHandlers, service.Upstream.Handlers...)
 		serviceHandlers = append(serviceHandlers, func(_ context.Context, terminal *app.RequestContext) {
-			terminal.String(
-				200,
-				"lumen route=%s service=%s upstream=%s host=%s path=%s query=%s",
-				route.ID,
-				service.ID,
-				service.Upstream.ID,
-				string(terminal.Host()),
-				string(terminal.Path()),
-				string(terminal.Request.URI().QueryArgs().QueryString()),
-			)
+			endpoint, err := service.Upstream.Balancer.Pick(nextCtx)
+			if err != nil {
+				terminal.SetStatusCode(503)
+				return
+			}
+
+			target := resolveTarget(service, service.Upstream, endpoint, terminal)
+			if err := service.Proxy.ServeHTTP(nextCtx, terminal, target); err != nil {
+				switch {
+				case errors.Is(err, proxy.ErrTimeout):
+					terminal.SetStatusCode(504)
+				case errors.Is(err, proxy.ErrInvalidTarget):
+					terminal.SetStatusCode(502)
+				default:
+					terminal.SetStatusCode(502)
+				}
+			}
 		})
 		next.SetIndex(-1)
 		next.SetHandlers(serviceHandlers)
@@ -175,22 +201,31 @@ func BuildSnapshot(options config.Options) (*RuntimeSnapshot, error) {
 			return nil, fmt.Errorf("upstream %q plugins: %w", id, err)
 		}
 		endpoints := make([]*Endpoint, 0, len(upstreamOptions.Endpoints))
+		balancerEndpoints := make([]balancer.Endpoint, 0, len(upstreamOptions.Endpoints))
 		for _, endpointOptions := range upstreamOptions.Endpoints {
 			weight := endpointOptions.Weight
 			if weight == 0 {
 				weight = 1
 			}
-			endpoints = append(endpoints, &Endpoint{
-				Address: endpointOptions.Address,
-				Weight:  weight,
-				Tags:    endpointOptions.Tags,
-			})
+			endpoint := &Endpoint{
+				Addr:      endpointOptions.Address,
+				Load:      weight,
+				Tags:      endpointOptions.Tags,
+				Available: true,
+			}
+			endpoints = append(endpoints, endpoint)
+			balancerEndpoints = append(balancerEndpoints, endpoint)
+		}
+		upstreamBalancer, err := buildBalancer(upstreamOptions, balancerEndpoints)
+		if err != nil {
+			return nil, fmt.Errorf("upstream %q balancer: %w", id, err)
 		}
 		upstreams[id] = &Upstream{
 			ID:        id,
 			Options:   upstreamOptions,
 			Handlers:  handlers,
 			Endpoints: endpoints,
+			Balancer:  upstreamBalancer,
 		}
 	}
 
@@ -205,6 +240,7 @@ func BuildSnapshot(options config.Options) (*RuntimeSnapshot, error) {
 			Options:  serviceOptions,
 			Handlers: handlers,
 			Upstream: upstreams[serviceOptions.Upstream],
+			Proxy:    proxy.NewHTTP(proxy.HTTPOptions{Timeout: serviceOptions.Timeout}),
 		}
 	}
 
@@ -230,6 +266,48 @@ func BuildSnapshot(options config.Options) (*RuntimeSnapshot, error) {
 		Services:       services,
 		Upstreams:      upstreams,
 	}, nil
+}
+
+func buildBalancer(options config.UpstreamOptions, endpoints []balancer.Endpoint) (balancer.Balancer, error) {
+	switch options.Balancer.Type {
+	case "", "round_robin":
+		return roundrobin.New(endpoints, options.Balancer.Params)
+	default:
+		return nil, fmt.Errorf("balancer type %q is not supported", options.Balancer.Type)
+	}
+}
+
+func resolveTarget(service *Service, upstream *Upstream, endpoint balancer.Endpoint, c *app.RequestContext) proxy.Target {
+	scheme := upstream.Options.Scheme
+	if scheme == "" {
+		scheme = service.Options.Protocol
+	}
+	if scheme == "" {
+		scheme = "http"
+	}
+
+	return proxy.Target{
+		Scheme:  scheme,
+		Address: endpoint.Address(),
+		Host:    resolveUpstreamHost(upstream.Options, endpoint, c),
+	}
+}
+
+func resolveUpstreamHost(options config.UpstreamOptions, endpoint balancer.Endpoint, c *app.RequestContext) string {
+	switch options.PassHost {
+	case "", "pass":
+		return string(c.Host())
+	case "rewrite":
+		return options.UpstreamHost
+	case "node":
+		host, _, err := net.SplitHostPort(endpoint.Address())
+		if err == nil {
+			return host
+		}
+		return endpoint.Address()
+	default:
+		return string(c.Host())
+	}
 }
 
 func buildPluginHandlers(

@@ -2,15 +2,20 @@ package gateway
 
 import (
 	"context"
+	"io"
+	"net"
+	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/joey/lumen-gateway/internal/config"
+	"github.com/joey/lumen-gateway/internal/proxy"
 )
 
 func TestBuildSnapshotBuildsPluginChainsForAllScopes(t *testing.T) {
-	snapshot, err := BuildSnapshot(gatewayOptions())
+	snapshot, err := BuildSnapshot(gatewayOptions("127.0.0.1:9001"))
 	if err != nil {
 		t.Fatalf("BuildSnapshot() error = %v", err)
 	}
@@ -32,11 +37,25 @@ func TestBuildSnapshotBuildsPluginChainsForAllScopes(t *testing.T) {
 	}
 }
 
-func TestServeHTTPAppliesPluginsAndReturnsMatchedRouteDebugResponse(t *testing.T) {
-	gw, err := New(gatewayOptions())
+func TestServeHTTPProxiesToMatchedUpstream(t *testing.T) {
+	var gotHost string
+	var gotPath string
+	var gotQuery url.Values
+
+	gw, err := New(gatewayOptions("127.0.0.1:9001"))
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
+	installTransport(gw, roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		gotHost = r.Host
+		gotPath = r.URL.Path
+		gotQuery = r.URL.Query()
+		return &http.Response{
+			StatusCode: http.StatusCreated,
+			Header:     http.Header{"X-Upstream": []string{"ok"}},
+			Body:       io.NopCloser(strings.NewReader("proxied")),
+		}, nil
+	}))
 
 	c := app.NewContext(0)
 	c.Request.SetMethod("GET")
@@ -46,22 +65,29 @@ func TestServeHTTPAppliesPluginsAndReturnsMatchedRouteDebugResponse(t *testing.T
 
 	gw.ServeHTTP(context.Background(), c)
 
-	if got := c.Response.StatusCode(); got != 200 {
-		t.Fatalf("status = %d, want 200", got)
+	if got := c.Response.StatusCode(); got != http.StatusCreated {
+		t.Fatalf("status = %d, want %d", got, http.StatusCreated)
 	}
-	body := string(c.Response.Body())
-	for _, want := range []string{
-		"route=user-api",
-		"service=user-service",
-		"upstream=user-upstream",
-		"host=users.internal",
-		"path=/users",
-		"matched_route=user-api",
-		"upstream=user-upstream",
-	} {
-		if !strings.Contains(body, want) {
-			t.Fatalf("body = %q, want substring %q", body, want)
-		}
+	if got := string(c.Response.Body()); got != "proxied" {
+		t.Fatalf("body = %q, want proxied", got)
+	}
+	if got := gotHost; got != "users.internal" {
+		t.Fatalf("upstream host = %q, want users.internal", got)
+	}
+	if got := gotPath; got != "/users" {
+		t.Fatalf("upstream path = %q, want /users", got)
+	}
+	if got := gotQuery.Get("id"); got != "1" {
+		t.Fatalf("id query = %q, want 1", got)
+	}
+	if got := gotQuery.Get("matched_route"); got != "user-api" {
+		t.Fatalf("matched_route query = %q, want user-api", got)
+	}
+	if got := gotQuery.Get("upstream"); got != "user-upstream" {
+		t.Fatalf("upstream query = %q, want user-upstream", got)
+	}
+	if got := c.Response.Header.Get("X-Upstream"); got != "ok" {
+		t.Fatalf("X-Upstream = %q, want ok", got)
 	}
 	if got := c.Response.Header.Get("X-Global"); got != "true" {
 		t.Fatalf("X-Global = %q, want true", got)
@@ -71,8 +97,76 @@ func TestServeHTTPAppliesPluginsAndReturnsMatchedRouteDebugResponse(t *testing.T
 	}
 }
 
+func TestServeHTTPSupportsApisixPassHostModes(t *testing.T) {
+	tests := []struct {
+		name         string
+		passHost     string
+		upstreamHost string
+		wantHost     func(string) string
+	}{
+		{
+			name:     "node",
+			passHost: "node",
+			wantHost: func(addr string) string {
+				host, _, err := net.SplitHostPort(addr)
+				if err != nil {
+					return addr
+				}
+				return host
+			},
+		},
+		{
+			name:         "rewrite",
+			passHost:     "rewrite",
+			upstreamHost: "orders.internal",
+			wantHost: func(string) string {
+				return "orders.internal"
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotHost string
+			endpointAddress := "10.0.0.8:9080"
+			options := gatewayOptions(endpointAddress)
+			upstreamOptions := options.Upstreams["user-upstream"]
+			upstreamOptions.PassHost = tt.passHost
+			upstreamOptions.UpstreamHost = tt.upstreamHost
+			options.Upstreams["user-upstream"] = upstreamOptions
+
+			gw, err := New(options)
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+			installTransport(gw, roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				gotHost = r.Host
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader("")),
+				}, nil
+			}))
+
+			c := app.NewContext(0)
+			c.Request.SetMethod("GET")
+			c.Request.SetHost("original.test")
+			c.Request.URI().SetPath("/api/users")
+
+			gw.ServeHTTP(context.Background(), c)
+
+			if got := c.Response.StatusCode(); got != http.StatusOK {
+				t.Fatalf("status = %d, want %d", got, http.StatusOK)
+			}
+			if got := gotHost; got != tt.wantHost(endpointAddress) {
+				t.Fatalf("upstream host = %q, want %q", got, tt.wantHost(endpointAddress))
+			}
+		})
+	}
+}
+
 func TestServeHTTPReturnsNotFoundForUnknownRoute(t *testing.T) {
-	gw, err := New(gatewayOptions())
+	gw, err := New(gatewayOptions("127.0.0.1:9001"))
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -88,7 +182,7 @@ func TestServeHTTPReturnsNotFoundForUnknownRoute(t *testing.T) {
 	}
 }
 
-func gatewayOptions() config.Options {
+func gatewayOptions(endpointAddress string) config.Options {
 	return config.Options{
 		GlobalPlugins: []config.PluginRef{{
 			Name: "response_transformer",
@@ -160,9 +254,11 @@ func gatewayOptions() config.Options {
 		},
 		Upstreams: map[string]config.UpstreamOptions{
 			"user-upstream": {
-				ID: "user-upstream",
+				ID:       "user-upstream",
+				Scheme:   "http",
+				PassHost: "pass",
 				Endpoints: []config.EndpointOptions{
-					{Address: "127.0.0.1:9001", Weight: 1},
+					{Address: endpointAddress, Weight: 1},
 				},
 				Plugins: []config.PluginRef{{
 					Name: "request_transformer",
@@ -174,5 +270,21 @@ func gatewayOptions() config.Options {
 				}},
 			},
 		},
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
+
+func installTransport(gw *Gateway, transport http.RoundTripper) {
+	snapshot := gw.snapshot.Load()
+	for _, service := range snapshot.Services {
+		service.Proxy = proxy.NewHTTP(proxy.HTTPOptions{
+			Timeout:   service.Options.Timeout,
+			Transport: transport,
+		})
 	}
 }
