@@ -89,6 +89,15 @@ func (g *Gateway) Shutdown() error {
 	return g.server.Shutdown(context.Background())
 }
 
+func (g *Gateway) Reload(options config.Options) error {
+	snapshot, err := BuildSnapshot(options)
+	if err != nil {
+		return err
+	}
+	g.snapshot.Store(snapshot)
+	return nil
+}
+
 func (g *Gateway) ServeHTTP(ctx context.Context, c *app.RequestContext) {
 	snapshot := g.snapshot.Load()
 	if snapshot == nil || snapshot.Router == nil {

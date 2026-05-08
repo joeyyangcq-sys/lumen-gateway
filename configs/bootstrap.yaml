@@ -1,0 +1,15 @@
+gateway:
+  listen: ":18080"
+  # file: load lumen YAML config from disk
+  # etcd_apisix: load APISIX-compatible resources from etcd (/apisix/*)
+  source: file
+
+file:
+  path: configs/lumen.yaml
+
+etcd:
+  endpoints:
+    - "127.0.0.1:2379"
+  prefix: "/apisix"
+  dial_timeout: 3s
+

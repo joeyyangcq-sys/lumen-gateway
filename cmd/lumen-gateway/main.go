@@ -4,11 +4,11 @@ import (
 	"log/slog"
 	"os"
 
-	"github.com/joey/lumen-gateway/internal/app"
+	lumen "github.com/joey/lumen-gateway"
 )
 
 func main() {
-	if err := app.Run(os.Args); err != nil {
+	if err := lumen.Run(); err != nil {
 		slog.Error("failed to run lumen gateway", "error", err)
 		os.Exit(1)
 	}

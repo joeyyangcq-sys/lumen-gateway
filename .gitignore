@@ -5,3 +5,5 @@ coverage.out
 *.log
 .DS_Store
 
+# local execution notes / plans
+ETCD_APISIX_EXECUTION_PLAN.md

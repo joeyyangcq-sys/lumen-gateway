@@ -35,6 +35,7 @@ type RouteOptions struct {
 	Hosts   []string    `yaml:"hosts"`
 	Methods []string    `yaml:"methods"`
 	Paths   []string    `yaml:"paths"`
+	Priority int        `yaml:"priority"`
 	Service string      `yaml:"service"`
 	Plugins []PluginRef `yaml:"plugins"`
 }
