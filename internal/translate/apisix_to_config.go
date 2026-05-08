@@ -1,6 +1,7 @@
 package translate
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -409,6 +410,10 @@ func translateApisixPlugin(name string, raw json.RawMessage) ([]config.PluginRef
 		return translateProxyRewrite(raw)
 	case "response-rewrite":
 		return translateResponseRewrite(raw)
+	case "request-id":
+		return translateRequestID(raw)
+	case "limit-count":
+		return translateLimitCount(raw)
 	default:
 		return nil, nil
 	}
@@ -416,9 +421,12 @@ func translateApisixPlugin(name string, raw json.RawMessage) ([]config.PluginRef
 
 func translateProxyRewrite(raw json.RawMessage) ([]config.PluginRef, error) {
 	type proxyRewrite struct {
-		Host    string            `json:"host"`
-		URI     string            `json:"uri"`
-		Headers map[string]string `json:"headers"`
+		Host                    string          `json:"host"`
+		URI                     string          `json:"uri"`
+		Method                  string          `json:"method"`
+		RegexURI                []string        `json:"regex_uri"`
+		Headers                 json.RawMessage `json:"headers"`
+		UseRealRequestURIUnsafe bool            `json:"use_real_request_uri_unsafe"`
 	}
 
 	cfg := proxyRewrite{}
@@ -426,13 +434,52 @@ func translateProxyRewrite(raw json.RawMessage) ([]config.PluginRef, error) {
 		return nil, fmt.Errorf("decode proxy-rewrite: %w", err)
 	}
 
-	refs := make([]config.PluginRef, 0, 2)
-	if cfg.Host != "" || len(cfg.Headers) > 0 {
-		params := map[string]any{
-			"host": cfg.Host,
-			"set": map[string]any{
-				"headers": cfg.Headers,
+	headers, err := decodeProxyRewriteHeaders(cfg.Headers)
+	if err != nil {
+		return nil, err
+	}
+
+	refs := make([]config.PluginRef, 0, 3)
+	if cfg.URI == "" && len(cfg.RegexURI) > 0 {
+		if len(cfg.RegexURI)%2 != 0 {
+			return nil, errors.New("regex_uri requires pattern/replacement pairs")
+		}
+
+		rules := make([]map[string]any, 0, len(cfg.RegexURI)/2)
+		for index := 0; index < len(cfg.RegexURI); index += 2 {
+			rules = append(rules, map[string]any{
+				"pattern":     cfg.RegexURI[index],
+				"replacement": cfg.RegexURI[index+1],
+			})
+		}
+
+		refs = append(refs, config.PluginRef{
+			Name: "rewrite_path_regex",
+			Params: map[string]any{
+				"rules": rules,
 			},
+		})
+	}
+
+	if cfg.Method != "" || cfg.Host != "" || len(headers.Add) > 0 || len(headers.Set) > 0 || len(headers.Remove) > 0 {
+		params := map[string]any{
+			"method": cfg.Method,
+			"host":   cfg.Host,
+		}
+		if len(headers.Add) > 0 {
+			params["add"] = map[string]any{
+				"headers": headers.Add,
+			}
+		}
+		if len(headers.Remove) > 0 {
+			params["remove"] = map[string]any{
+				"headers": headers.Remove,
+			}
+		}
+		if len(headers.Set) > 0 {
+			params["set"] = map[string]any{
+				"headers": headers.Set,
+			}
 		}
 		refs = append(refs, config.PluginRef{
 			Name:   "request_transformer",
@@ -448,11 +495,50 @@ func translateProxyRewrite(raw json.RawMessage) ([]config.PluginRef, error) {
 	return refs, nil
 }
 
+func decodeProxyRewriteHeaders(raw json.RawMessage) (struct {
+	Add    map[string]string
+	Set    map[string]string
+	Remove []string
+}, error) {
+	out := struct {
+		Add    map[string]string
+		Set    map[string]string
+		Remove []string
+	}{}
+
+	if len(raw) == 0 {
+		return out, nil
+	}
+
+	var actionHeaders struct {
+		Add    map[string]string `json:"add"`
+		Set    map[string]string `json:"set"`
+		Remove []string          `json:"remove"`
+	}
+	if err := json.Unmarshal(raw, &actionHeaders); err != nil {
+		return out, fmt.Errorf("decode proxy-rewrite headers: %w", err)
+	}
+	if len(actionHeaders.Add) > 0 || len(actionHeaders.Set) > 0 || len(actionHeaders.Remove) > 0 {
+		out.Add = actionHeaders.Add
+		out.Set = actionHeaders.Set
+		out.Remove = actionHeaders.Remove
+		return out, nil
+	}
+
+	plainSet := make(map[string]string)
+	if err := json.Unmarshal(raw, &plainSet); err != nil {
+		return out, fmt.Errorf("decode proxy-rewrite headers: %w", err)
+	}
+	out.Set = plainSet
+	return out, nil
+}
+
 func translateResponseRewrite(raw json.RawMessage) ([]config.PluginRef, error) {
 	type responseRewrite struct {
-		StatusCode int               `json:"status_code"`
-		Body       string            `json:"body"`
-		Headers    map[string]string `json:"headers"`
+		StatusCode int             `json:"status_code"`
+		Body       string          `json:"body"`
+		BodyBase64 bool            `json:"body_base64"`
+		Headers    json.RawMessage `json:"headers"`
 	}
 
 	cfg := responseRewrite{}
@@ -460,20 +546,109 @@ func translateResponseRewrite(raw json.RawMessage) ([]config.PluginRef, error) {
 		return nil, fmt.Errorf("decode response-rewrite: %w", err)
 	}
 
-	if cfg.StatusCode == 0 && cfg.Body == "" && len(cfg.Headers) == 0 {
+	headers, err := decodeResponseRewriteHeaders(cfg.Headers)
+	if err != nil {
+		return nil, err
+	}
+
+	if cfg.StatusCode == 0 && cfg.Body == "" && !cfg.BodyBase64 && len(headers.Add) == 0 && len(headers.Set) == 0 && len(headers.Remove) == 0 {
 		return nil, nil
 	}
 
+	params := map[string]any{
+		"status": cfg.StatusCode,
+		"body":   cfg.Body,
+	}
+	if cfg.BodyBase64 {
+		if _, err := base64.StdEncoding.DecodeString(cfg.Body); err != nil {
+			return nil, fmt.Errorf("decode response-rewrite body_base64: %w", err)
+		}
+		params["body_base64"] = true
+	}
+	if len(headers.Add) > 0 {
+		params["add"] = map[string]any{
+			"headers": headers.Add,
+		}
+	}
+	if len(headers.Set) > 0 {
+		params["set"] = map[string]any{
+			"headers": headers.Set,
+		}
+	}
+	if len(headers.Remove) > 0 {
+		params["remove"] = map[string]any{
+			"headers": headers.Remove,
+		}
+	}
+
 	return []config.PluginRef{{
-		Name: "response_transformer",
-		Params: map[string]any{
-			"status": cfg.StatusCode,
-			"body":   cfg.Body,
-			"set": map[string]any{
-				"headers": cfg.Headers,
-			},
-		},
+		Name:   "response_transformer",
+		Params: params,
 	}}, nil
+}
+
+func translateRequestID(raw json.RawMessage) ([]config.PluginRef, error) {
+	params := make(map[string]any)
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &params); err != nil {
+			return nil, fmt.Errorf("decode request-id: %w", err)
+		}
+	}
+	return []config.PluginRef{{
+		Name:   "request_id",
+		Params: params,
+	}}, nil
+}
+
+func translateLimitCount(raw json.RawMessage) ([]config.PluginRef, error) {
+	params := make(map[string]any)
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &params); err != nil {
+			return nil, fmt.Errorf("decode limit-count: %w", err)
+		}
+	}
+	return []config.PluginRef{{
+		Name:   "limit_count",
+		Params: params,
+	}}, nil
+}
+
+func decodeResponseRewriteHeaders(raw json.RawMessage) (struct {
+	Add    map[string]string
+	Set    map[string]string
+	Remove []string
+}, error) {
+	out := struct {
+		Add    map[string]string
+		Set    map[string]string
+		Remove []string
+	}{}
+
+	if len(raw) == 0 {
+		return out, nil
+	}
+
+	var actionHeaders struct {
+		Add    map[string]string `json:"add"`
+		Set    map[string]string `json:"set"`
+		Remove []string          `json:"remove"`
+	}
+	if err := json.Unmarshal(raw, &actionHeaders); err != nil {
+		return out, fmt.Errorf("decode response-rewrite headers: %w", err)
+	}
+	if len(actionHeaders.Add) > 0 || len(actionHeaders.Set) > 0 || len(actionHeaders.Remove) > 0 {
+		out.Add = actionHeaders.Add
+		out.Set = actionHeaders.Set
+		out.Remove = actionHeaders.Remove
+		return out, nil
+	}
+
+	plainSet := make(map[string]string)
+	if err := json.Unmarshal(raw, &plainSet); err != nil {
+		return out, fmt.Errorf("decode response-rewrite headers: %w", err)
+	}
+	out.Set = plainSet
+	return out, nil
 }
 
 func isDisabledApisixPlugin(raw json.RawMessage) bool {

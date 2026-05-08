@@ -18,6 +18,7 @@ import (
 	"github.com/joey/lumen-gateway/internal/plugin/builtin"
 	"github.com/joey/lumen-gateway/internal/proxy"
 	"github.com/joey/lumen-gateway/internal/router"
+	"github.com/joey/lumen-gateway/internal/runtimectx"
 )
 
 type Gateway struct {
@@ -130,6 +131,7 @@ func (g *Gateway) ServeHTTP(ctx context.Context, c *app.RequestContext) {
 		c.SetStatusCode(404)
 		return
 	}
+	c.Set(runtimectx.RouteIDKey, route.ID)
 
 	handlers := make([]app.HandlerFunc, 0)
 	handlers = append(handlers, snapshot.GlobalHandlers...)

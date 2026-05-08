@@ -191,3 +191,101 @@ func TestApisixSnapshotToConfigIgnoresDisabledPlugins(t *testing.T) {
 		t.Fatalf("route plugins = %#v, want disabled plugin to be ignored", options.Routes["route-1"].Plugins)
 	}
 }
+
+func TestTranslateProxyRewriteMapsMethodRegexAndHeaderActions(t *testing.T) {
+	refs, err := translateProxyRewrite(json.RawMessage(`{
+		"method": "PATCH",
+		"regex_uri": ["^/orders/(\\d+)$", "/internal/orders/$1"],
+		"headers": {
+			"add": {"X-Trace": "trace-$1"},
+			"remove": ["X-Remove"],
+			"set": {"X-Mode": "rewrite"}
+		}
+	}`))
+	if err != nil {
+		t.Fatalf("translateProxyRewrite() error = %v", err)
+	}
+
+	if len(refs) != 2 {
+		t.Fatalf("refs = %d, want 2", len(refs))
+	}
+	if got := refs[0].Name; got != "rewrite_path_regex" {
+		t.Fatalf("first ref = %q, want rewrite_path_regex", got)
+	}
+	if got := refs[1].Name; got != "request_transformer" {
+		t.Fatalf("second ref = %q, want request_transformer", got)
+	}
+
+	params, ok := refs[1].Params.(map[string]any)
+	if !ok {
+		t.Fatalf("request transformer params = %#v, want map", refs[1].Params)
+	}
+	if got := params["method"]; got != "PATCH" {
+		t.Fatalf("method = %#v, want PATCH", got)
+	}
+	addBlock, ok := params["add"].(map[string]any)
+	if !ok {
+		t.Fatalf("add block = %#v, want map", params["add"])
+	}
+	addHeaders, ok := addBlock["headers"].(map[string]string)
+	if !ok {
+		t.Fatalf("add headers = %#v, want map[string]string", addBlock["headers"])
+	}
+	if got := addHeaders["X-Trace"]; got != "trace-$1" {
+		t.Fatalf("X-Trace add header = %q, want trace-$1", got)
+	}
+}
+
+func TestTranslateRequestIDAndLimitCount(t *testing.T) {
+	requestID, err := translateRequestID(json.RawMessage(`{
+		"header_name": "X-Req-Id",
+		"include_in_response": false,
+		"algorithm": "uuid"
+	}`))
+	if err != nil {
+		t.Fatalf("translateRequestID() error = %v", err)
+	}
+	if len(requestID) != 1 || requestID[0].Name != "request_id" {
+		t.Fatalf("request-id refs = %#v, want request_id plugin", requestID)
+	}
+
+	limitCount, err := translateLimitCount(json.RawMessage(`{
+		"count": 2,
+		"time_window": 60,
+		"key_type": "var",
+		"key": "remote_addr",
+		"rejected_code": 429
+	}`))
+	if err != nil {
+		t.Fatalf("translateLimitCount() error = %v", err)
+	}
+	if len(limitCount) != 1 || limitCount[0].Name != "limit_count" {
+		t.Fatalf("limit-count refs = %#v, want limit_count plugin", limitCount)
+	}
+}
+
+func TestTranslateResponseRewriteMapsHeaderActionsAndBase64Body(t *testing.T) {
+	refs, err := translateResponseRewrite(json.RawMessage(`{
+		"status_code": 202,
+		"body": "eyJvayI6dHJ1ZX0=",
+		"body_base64": true,
+		"headers": {
+			"add": {"X-Trace":"1"},
+			"remove": ["X-Delete"],
+			"set": {"X-Mode":"rewrite"}
+		}
+	}`))
+	if err != nil {
+		t.Fatalf("translateResponseRewrite() error = %v", err)
+	}
+	if len(refs) != 1 || refs[0].Name != "response_transformer" {
+		t.Fatalf("refs = %#v, want response_transformer", refs)
+	}
+	params, ok := refs[0].Params.(map[string]any)
+	if !ok {
+		t.Fatalf("params = %#v, want map", refs[0].Params)
+	}
+	if got := params["body_base64"]; got != true {
+		t.Fatalf("body_base64 = %#v, want true", got)
+	}
+}
