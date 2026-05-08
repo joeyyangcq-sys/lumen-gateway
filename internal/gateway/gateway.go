@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"slices"
 	"sync/atomic"
 
 	"github.com/cloudwego/hertz/pkg/app"
@@ -179,14 +180,14 @@ func BuildSnapshot(options config.Options) (*RuntimeSnapshot, error) {
 		return nil, err
 	}
 
-	globalHandlers, err := buildPluginHandlers(registry, options, options.GlobalPlugins)
+	globalHandlers, err := buildPluginHandlers(registry, options, plugin.ScopeGlobal, options.GlobalPlugins)
 	if err != nil {
 		return nil, err
 	}
 
 	serverHandlers := make([]app.HandlerFunc, 0)
 	for _, serverOptions := range options.Servers {
-		handlers, err := buildPluginHandlers(registry, options, serverOptions.Plugins)
+		handlers, err := buildPluginHandlers(registry, options, plugin.ScopeServer, serverOptions.Plugins)
 		if err != nil {
 			return nil, fmt.Errorf("server %q plugins: %w", serverOptions.ID, err)
 		}
@@ -196,7 +197,7 @@ func BuildSnapshot(options config.Options) (*RuntimeSnapshot, error) {
 
 	upstreams := make(map[string]*Upstream, len(options.Upstreams))
 	for id, upstreamOptions := range options.Upstreams {
-		handlers, err := buildPluginHandlers(registry, options, upstreamOptions.Plugins)
+		handlers, err := buildPluginHandlers(registry, options, plugin.ScopeUpstream, upstreamOptions.Plugins)
 		if err != nil {
 			return nil, fmt.Errorf("upstream %q plugins: %w", id, err)
 		}
@@ -231,7 +232,7 @@ func BuildSnapshot(options config.Options) (*RuntimeSnapshot, error) {
 
 	services := make(map[string]*Service, len(options.Services))
 	for id, serviceOptions := range options.Services {
-		handlers, err := buildPluginHandlers(registry, options, serviceOptions.Plugins)
+		handlers, err := buildPluginHandlers(registry, options, plugin.ScopeService, serviceOptions.Plugins)
 		if err != nil {
 			return nil, fmt.Errorf("service %q plugins: %w", id, err)
 		}
@@ -251,7 +252,7 @@ func BuildSnapshot(options config.Options) (*RuntimeSnapshot, error) {
 		if err := r.Add(routeOptions); err != nil {
 			return nil, err
 		}
-		handlers, err := buildPluginHandlers(registry, options, routeOptions.Plugins)
+		handlers, err := buildPluginHandlers(registry, options, plugin.ScopeRoute, routeOptions.Plugins)
 		if err != nil {
 			return nil, fmt.Errorf("route %q plugins: %w", id, err)
 		}
@@ -313,10 +314,17 @@ func resolveUpstreamHost(options config.UpstreamOptions, endpoint balancer.Endpo
 func buildPluginHandlers(
 	registry *plugin.Registry,
 	options config.Options,
+	scope plugin.Scope,
 	refs []config.PluginRef,
 ) ([]app.HandlerFunc, error) {
-	handlers := make([]app.HandlerFunc, 0, len(refs))
-	for _, ref := range refs {
+	type builtPlugin struct {
+		index    int
+		priority int
+		handler  app.HandlerFunc
+	}
+
+	built := make([]builtPlugin, 0, len(refs))
+	for index, ref := range refs {
 		name := ref.Name
 		params := ref.Params
 		if ref.Use != "" {
@@ -324,15 +332,44 @@ func buildPluginHandlers(
 			name = definition.Name
 			params = definition.Params
 		}
-		factory := registry.Factory(name)
-		if factory == nil {
+		definition, ok := registry.Definition(name)
+		if !ok {
 			return nil, fmt.Errorf("plugin %q is not registered", name)
 		}
-		handler, err := factory(params)
+		if !definition.Supports(scope) {
+			return nil, fmt.Errorf("plugin %q does not support %s scope", name, scope)
+		}
+		handler, err := definition.Factory()(params)
 		if err != nil {
 			return nil, fmt.Errorf("plugin %q build failed: %w", name, err)
 		}
-		handlers = append(handlers, handler)
+		built = append(built, builtPlugin{
+			index:    index,
+			priority: definition.Metadata().Priority,
+			handler:  handler,
+		})
+	}
+
+	slices.SortStableFunc(built, func(left, right builtPlugin) int {
+		if left.priority == right.priority {
+			switch {
+			case left.index < right.index:
+				return -1
+			case left.index > right.index:
+				return 1
+			default:
+				return 0
+			}
+		}
+		if left.priority > right.priority {
+			return -1
+		}
+		return 1
+	})
+
+	handlers := make([]app.HandlerFunc, 0, len(built))
+	for _, plugin := range built {
+		handlers = append(handlers, plugin.handler)
 	}
 	return handlers, nil
 }

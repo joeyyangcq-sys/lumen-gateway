@@ -5,6 +5,7 @@ type Snapshot struct {
 	Services     map[string]Service
 	Upstreams    map[string]Upstream
 	PluginConfig map[string]PluginConfig
+	GlobalRules  map[string]GlobalRule
 }
 
 func NewSnapshot() Snapshot {
@@ -13,6 +14,6 @@ func NewSnapshot() Snapshot {
 		Services:     make(map[string]Service),
 		Upstreams:    make(map[string]Upstream),
 		PluginConfig: make(map[string]PluginConfig),
+		GlobalRules:  make(map[string]GlobalRule),
 	}
 }
-

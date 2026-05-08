@@ -43,11 +43,11 @@ type requestTransformerConfig struct {
 }
 
 func registerRequestTransformer(registry *plugin.Registry) error {
-	return registry.Register("request_transformer", func(params any) (app.HandlerFunc, error) {
-		cfg := requestTransformerConfig{}
-		if err := plugin.Decode(params, &cfg); err != nil {
-			return nil, err
-		}
+	return plugin.RegisterTyped(registry, plugin.Metadata{
+		Name:     "request_transformer",
+		Priority: 0,
+		Scopes:   plugin.AllScopes(),
+	}, func(cfg requestTransformerConfig) (app.HandlerFunc, error) {
 		return func(ctx context.Context, c *app.RequestContext) {
 			if cfg.Host != "" {
 				c.Request.SetHost(cfg.Host)
@@ -104,11 +104,11 @@ type responseTransformerConfig struct {
 }
 
 func registerResponseTransformer(registry *plugin.Registry) error {
-	return registry.Register("response_transformer", func(params any) (app.HandlerFunc, error) {
-		cfg := responseTransformerConfig{}
-		if err := plugin.Decode(params, &cfg); err != nil {
-			return nil, err
-		}
+	return plugin.RegisterTyped(registry, plugin.Metadata{
+		Name:     "response_transformer",
+		Priority: 0,
+		Scopes:   plugin.AllScopes(),
+	}, func(cfg responseTransformerConfig) (app.HandlerFunc, error) {
 		return func(ctx context.Context, c *app.RequestContext) {
 			c.Next(ctx)
 			for _, header := range cfg.Remove.Headers {
@@ -144,11 +144,11 @@ type replacePathConfig struct {
 }
 
 func registerReplacePath(registry *plugin.Registry) error {
-	return registry.Register("replace_path", func(params any) (app.HandlerFunc, error) {
-		cfg := replacePathConfig{}
-		if err := plugin.Decode(params, &cfg); err != nil {
-			return nil, err
-		}
+	return plugin.RegisterTyped(registry, plugin.Metadata{
+		Name:     "replace_path",
+		Priority: 0,
+		Scopes:   plugin.AllScopes(),
+	}, func(cfg replacePathConfig) (app.HandlerFunc, error) {
 		if cfg.Path == "" {
 			return nil, errors.New("replace_path requires path")
 		}
@@ -168,11 +168,11 @@ type stripPrefixConfig struct {
 }
 
 func registerStripPrefix(registry *plugin.Registry) error {
-	return registry.Register("strip_prefix", func(params any) (app.HandlerFunc, error) {
-		cfg := stripPrefixConfig{}
-		if err := plugin.Decode(params, &cfg); err != nil {
-			return nil, err
-		}
+	return plugin.RegisterTyped(registry, plugin.Metadata{
+		Name:     "strip_prefix",
+		Priority: 0,
+		Scopes:   plugin.AllScopes(),
+	}, func(cfg stripPrefixConfig) (app.HandlerFunc, error) {
 		prefixes := cfg.Prefixes
 		if cfg.Prefix != "" {
 			prefixes = append(prefixes, cfg.Prefix)
@@ -204,11 +204,11 @@ type addPrefixConfig struct {
 }
 
 func registerAddPrefix(registry *plugin.Registry) error {
-	return registry.Register("add_prefix", func(params any) (app.HandlerFunc, error) {
-		cfg := addPrefixConfig{}
-		if err := plugin.Decode(params, &cfg); err != nil {
-			return nil, err
-		}
+	return plugin.RegisterTyped(registry, plugin.Metadata{
+		Name:     "add_prefix",
+		Priority: 0,
+		Scopes:   plugin.AllScopes(),
+	}, func(cfg addPrefixConfig) (app.HandlerFunc, error) {
 		if cfg.Prefix == "" {
 			return nil, errors.New("add_prefix requires prefix")
 		}

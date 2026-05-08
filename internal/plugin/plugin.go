@@ -3,39 +3,112 @@ package plugin
 import (
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"gopkg.in/yaml.v3"
 )
 
+type Scope string
+
+const (
+	ScopeGlobal   Scope = "global"
+	ScopeServer   Scope = "server"
+	ScopeRoute    Scope = "route"
+	ScopeService  Scope = "service"
+	ScopeUpstream Scope = "upstream"
+)
+
+type Metadata struct {
+	Name     string
+	Priority int
+	Scopes   []Scope
+}
+
 type Factory func(params any) (app.HandlerFunc, error)
 
+type Definition struct {
+	metadata Metadata
+	factory  Factory
+}
+
+func (d Definition) Metadata() Metadata {
+	return d.metadata
+}
+
+func (d Definition) Factory() Factory {
+	return d.factory
+}
+
+func (d Definition) Supports(scope Scope) bool {
+	return supportsScope(d.metadata.Scopes, scope)
+}
+
 type Registry struct {
-	factories map[string]Factory
+	definitions map[string]Definition
 }
 
 func NewRegistry() *Registry {
 	return &Registry{
-		factories: make(map[string]Factory),
+		definitions: make(map[string]Definition),
 	}
 }
 
-func (r *Registry) Register(name string, factory Factory) error {
-	if name == "" {
+func (r *Registry) Register(metadata Metadata, factory Factory) error {
+	if metadata.Name == "" {
 		return errors.New("plugin name cannot be empty")
 	}
 	if factory == nil {
-		return fmt.Errorf("plugin %q factory cannot be nil", name)
+		return fmt.Errorf("plugin %q factory cannot be nil", metadata.Name)
 	}
-	if _, ok := r.factories[name]; ok {
-		return fmt.Errorf("plugin %q already exists", name)
+	if len(metadata.Scopes) == 0 {
+		return fmt.Errorf("plugin %q scopes cannot be empty", metadata.Name)
 	}
-	r.factories[name] = factory
+	if _, ok := r.definitions[metadata.Name]; ok {
+		return fmt.Errorf("plugin %q already exists", metadata.Name)
+	}
+	r.definitions[metadata.Name] = Definition{
+		metadata: metadata,
+		factory:  factory,
+	}
 	return nil
 }
 
+func RegisterTyped[T any](r *Registry, metadata Metadata, factory func(T) (app.HandlerFunc, error)) error {
+	return r.Register(metadata, func(params any) (app.HandlerFunc, error) {
+		var cfg T
+		if err := Decode(params, &cfg); err != nil {
+			return nil, err
+		}
+		return factory(cfg)
+	})
+}
+
+func (r *Registry) Definition(name string) (Definition, bool) {
+	definition, ok := r.definitions[name]
+	return definition, ok
+}
+
 func (r *Registry) Factory(name string) Factory {
-	return r.factories[name]
+	definition, ok := r.Definition(name)
+	if !ok {
+		return nil
+	}
+	return definition.Factory()
+}
+
+func AllScopes() []Scope {
+	return []Scope{
+		ScopeGlobal,
+		ScopeServer,
+		ScopeRoute,
+		ScopeService,
+		ScopeUpstream,
+	}
+}
+
+func supportsScope(scopes []Scope, scope Scope) bool {
+	return slices.Contains(scopes, scope)
 }
 
 func Decode(params any, out any) error {

@@ -11,6 +11,7 @@ import (
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/joey/lumen-gateway/internal/config"
+	"github.com/joey/lumen-gateway/internal/plugin"
 	"github.com/joey/lumen-gateway/internal/proxy"
 )
 
@@ -182,6 +183,68 @@ func TestServeHTTPReturnsNotFoundForUnknownRoute(t *testing.T) {
 	}
 }
 
+func TestBuildPluginHandlersOrdersByPriority(t *testing.T) {
+	registry := plugin.NewRegistry()
+	mustRegisterPlugin(t, registry, plugin.Metadata{
+		Name:     "low",
+		Priority: 10,
+		Scopes:   []plugin.Scope{plugin.ScopeRoute},
+	}, "low")
+	mustRegisterPlugin(t, registry, plugin.Metadata{
+		Name:     "high",
+		Priority: 100,
+		Scopes:   []plugin.Scope{plugin.ScopeRoute},
+	}, "high")
+	mustRegisterPlugin(t, registry, plugin.Metadata{
+		Name:     "same-a",
+		Priority: 50,
+		Scopes:   []plugin.Scope{plugin.ScopeRoute},
+	}, "same-a")
+	mustRegisterPlugin(t, registry, plugin.Metadata{
+		Name:     "same-b",
+		Priority: 50,
+		Scopes:   []plugin.Scope{plugin.ScopeRoute},
+	}, "same-b")
+
+	handlers, err := buildPluginHandlers(registry, config.Options{}, plugin.ScopeRoute, []config.PluginRef{
+		{Name: "same-a"},
+		{Name: "low"},
+		{Name: "high"},
+		{Name: "same-b"},
+	})
+	if err != nil {
+		t.Fatalf("buildPluginHandlers() error = %v", err)
+	}
+
+	c := app.NewContext(0)
+	for _, handler := range handlers {
+		handler(context.Background(), c)
+	}
+
+	if got := string(c.Response.Body()); got != "high,same-a,same-b,low," {
+		t.Fatalf("body = %q, want priority-ordered plugin execution", got)
+	}
+}
+
+func TestBuildPluginHandlersRejectsUnsupportedScope(t *testing.T) {
+	registry := plugin.NewRegistry()
+	mustRegisterPlugin(t, registry, plugin.Metadata{
+		Name:     "route-only",
+		Priority: 0,
+		Scopes:   []plugin.Scope{plugin.ScopeRoute},
+	}, "route-only")
+
+	_, err := buildPluginHandlers(registry, config.Options{}, plugin.ScopeGlobal, []config.PluginRef{
+		{Name: "route-only"},
+	})
+	if err == nil {
+		t.Fatal("buildPluginHandlers() error = nil, want unsupported scope error")
+	}
+	if !strings.Contains(err.Error(), "does not support global scope") {
+		t.Fatalf("error = %q, want unsupported scope message", err.Error())
+	}
+}
+
 func gatewayOptions(endpointAddress string) config.Options {
 	return config.Options{
 		GlobalPlugins: []config.PluginRef{{
@@ -286,5 +349,17 @@ func installTransport(gw *Gateway, transport http.RoundTripper) {
 			Timeout:   service.Options.Timeout,
 			Transport: transport,
 		})
+	}
+}
+
+func mustRegisterPlugin(t *testing.T, registry *plugin.Registry, metadata plugin.Metadata, name string) {
+	t.Helper()
+	err := registry.Register(metadata, func(any) (app.HandlerFunc, error) {
+		return func(_ context.Context, c *app.RequestContext) {
+			c.Response.AppendBodyString(name + ",")
+		}, nil
+	})
+	if err != nil {
+		t.Fatalf("Register(%q) error = %v", metadata.Name, err)
 	}
 }

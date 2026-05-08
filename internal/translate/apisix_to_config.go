@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/joey/lumen-gateway/internal/apisix"
@@ -31,6 +32,12 @@ func ApisixSnapshotToConfig(s apisix.Snapshot, opts ApisixToConfigOptions) (conf
 		Upstreams: make(map[string]config.UpstreamOptions),
 	}
 
+	globalPlugins, err := apisixGlobalRulesToPlugins(s.GlobalRules)
+	if err != nil {
+		return config.Options{}, fmt.Errorf("global rules: %w", err)
+	}
+	out.GlobalPlugins = globalPlugins
+
 	for id, upstream := range s.Upstreams {
 		up, err := apisixUpstreamToConfig(upstream)
 		if err != nil {
@@ -40,7 +47,7 @@ func ApisixSnapshotToConfig(s apisix.Snapshot, opts ApisixToConfigOptions) (conf
 	}
 
 	for id, service := range s.Services {
-		svc, err := apisixServiceToConfig(service, out.Upstreams)
+		svc, err := apisixServiceToConfig(service, s.PluginConfig, out.Upstreams)
 		if err != nil {
 			return config.Options{}, fmt.Errorf("service %q: %w", id, err)
 		}
@@ -48,7 +55,7 @@ func ApisixSnapshotToConfig(s apisix.Snapshot, opts ApisixToConfigOptions) (conf
 	}
 
 	for id, route := range s.Routes {
-		rt, err := apisixRouteToConfig(route)
+		rt, err := apisixRouteToConfig(route, s.PluginConfig)
 		if err != nil {
 			return config.Options{}, fmt.Errorf("route %q: %w", id, err)
 		}
@@ -94,7 +101,7 @@ func ApisixSnapshotToConfig(s apisix.Snapshot, opts ApisixToConfigOptions) (conf
 	return out, nil
 }
 
-func apisixRouteToConfig(route apisix.Route) (config.RouteOptions, error) {
+func apisixRouteToConfig(route apisix.Route, pluginConfigs map[string]apisix.PluginConfig) (config.RouteOptions, error) {
 	id := route.ID.String()
 	if id == "" {
 		id = "route"
@@ -114,16 +121,22 @@ func apisixRouteToConfig(route apisix.Route) (config.RouteOptions, error) {
 		return config.RouteOptions{}, errors.New("uri/uris cannot be empty")
 	}
 
+	plugins, err := apisixMergePlugins(route.PluginConfigID, route.Plugins, pluginConfigs)
+	if err != nil {
+		return config.RouteOptions{}, fmt.Errorf("plugins: %w", err)
+	}
+
 	return config.RouteOptions{
 		ID:      id,
 		Hosts:   route.Hosts,
 		Methods: route.Methods,
 		Paths:   paths,
 		Service: "",
+		Plugins: plugins,
 	}, nil
 }
 
-func apisixServiceToConfig(service apisix.Service, upstreams map[string]config.UpstreamOptions) (config.ServiceOptions, error) {
+func apisixServiceToConfig(service apisix.Service, pluginConfigs map[string]apisix.PluginConfig, upstreams map[string]config.UpstreamOptions) (config.ServiceOptions, error) {
 	id := service.ID.String()
 	if id == "" {
 		id = "service"
@@ -144,10 +157,16 @@ func apisixServiceToConfig(service apisix.Service, upstreams map[string]config.U
 		return config.ServiceOptions{}, errors.New("missing upstream_id/upstream")
 	}
 
+	plugins, err := apisixMergePlugins(service.PluginConfigID, service.Plugins, pluginConfigs)
+	if err != nil {
+		return config.ServiceOptions{}, fmt.Errorf("plugins: %w", err)
+	}
+
 	return config.ServiceOptions{
 		ID:       id,
 		Protocol: "http",
 		Upstream: upstreamID,
+		Plugins:  plugins,
 	}, nil
 }
 
@@ -287,4 +306,187 @@ func apisixWildcardToRegex(uri string) string {
 	}
 	s = strings.Join(parts, "/")
 	return "^" + s + "$"
+}
+
+func apisixGlobalRulesToPlugins(globalRules map[string]apisix.GlobalRule) ([]config.PluginRef, error) {
+	if len(globalRules) == 0 {
+		return nil, nil
+	}
+
+	ids := make([]string, 0, len(globalRules))
+	for id := range globalRules {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+
+	merged := make(map[string]json.RawMessage)
+	for _, id := range ids {
+		plugins, err := decodeApisixPlugins(globalRules[id].Plugins)
+		if err != nil {
+			return nil, fmt.Errorf("global rule %q: %w", id, err)
+		}
+		mergeApisixPluginMaps(merged, plugins)
+	}
+
+	return apisixPluginsToRefs(merged)
+}
+
+func apisixMergePlugins(
+	pluginConfigID apisix.ID,
+	inline json.RawMessage,
+	pluginConfigs map[string]apisix.PluginConfig,
+) ([]config.PluginRef, error) {
+	merged := make(map[string]json.RawMessage)
+
+	if pluginConfigID != "" {
+		pluginConfig, ok := pluginConfigs[pluginConfigID.String()]
+		if !ok {
+			return nil, fmt.Errorf("plugin_config %q not found", pluginConfigID)
+		}
+		plugins, err := decodeApisixPlugins(pluginConfig.Plugins)
+		if err != nil {
+			return nil, fmt.Errorf("plugin_config %q: %w", pluginConfigID, err)
+		}
+		mergeApisixPluginMaps(merged, plugins)
+	}
+
+	inlinePlugins, err := decodeApisixPlugins(inline)
+	if err != nil {
+		return nil, err
+	}
+	mergeApisixPluginMaps(merged, inlinePlugins)
+
+	return apisixPluginsToRefs(merged)
+}
+
+func decodeApisixPlugins(raw json.RawMessage) (map[string]json.RawMessage, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+
+	plugins := make(map[string]json.RawMessage)
+	if err := json.Unmarshal(raw, &plugins); err != nil {
+		return nil, fmt.Errorf("decode plugins: %w", err)
+	}
+	return plugins, nil
+}
+
+func mergeApisixPluginMaps(dst map[string]json.RawMessage, src map[string]json.RawMessage) {
+	for name, raw := range src {
+		if isDisabledApisixPlugin(raw) {
+			delete(dst, name)
+			continue
+		}
+		dst[name] = raw
+	}
+}
+
+func apisixPluginsToRefs(plugins map[string]json.RawMessage) ([]config.PluginRef, error) {
+	if len(plugins) == 0 {
+		return nil, nil
+	}
+
+	names := make([]string, 0, len(plugins))
+	for name := range plugins {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	refs := make([]config.PluginRef, 0, len(names))
+	for _, name := range names {
+		translated, err := translateApisixPlugin(name, plugins[name])
+		if err != nil {
+			return nil, fmt.Errorf("plugin %q: %w", name, err)
+		}
+		refs = append(refs, translated...)
+	}
+	return refs, nil
+}
+
+func translateApisixPlugin(name string, raw json.RawMessage) ([]config.PluginRef, error) {
+	switch name {
+	case "proxy-rewrite":
+		return translateProxyRewrite(raw)
+	case "response-rewrite":
+		return translateResponseRewrite(raw)
+	default:
+		return nil, nil
+	}
+}
+
+func translateProxyRewrite(raw json.RawMessage) ([]config.PluginRef, error) {
+	type proxyRewrite struct {
+		Host    string            `json:"host"`
+		URI     string            `json:"uri"`
+		Headers map[string]string `json:"headers"`
+	}
+
+	cfg := proxyRewrite{}
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return nil, fmt.Errorf("decode proxy-rewrite: %w", err)
+	}
+
+	refs := make([]config.PluginRef, 0, 2)
+	if cfg.Host != "" || len(cfg.Headers) > 0 {
+		params := map[string]any{
+			"host": cfg.Host,
+			"set": map[string]any{
+				"headers": cfg.Headers,
+			},
+		}
+		refs = append(refs, config.PluginRef{
+			Name:   "request_transformer",
+			Params: params,
+		})
+	}
+	if cfg.URI != "" {
+		refs = append(refs, config.PluginRef{
+			Name:   "replace_path",
+			Params: map[string]any{"path": cfg.URI},
+		})
+	}
+	return refs, nil
+}
+
+func translateResponseRewrite(raw json.RawMessage) ([]config.PluginRef, error) {
+	type responseRewrite struct {
+		StatusCode int               `json:"status_code"`
+		Body       string            `json:"body"`
+		Headers    map[string]string `json:"headers"`
+	}
+
+	cfg := responseRewrite{}
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return nil, fmt.Errorf("decode response-rewrite: %w", err)
+	}
+
+	if cfg.StatusCode == 0 && cfg.Body == "" && len(cfg.Headers) == 0 {
+		return nil, nil
+	}
+
+	return []config.PluginRef{{
+		Name: "response_transformer",
+		Params: map[string]any{
+			"status": cfg.StatusCode,
+			"body":   cfg.Body,
+			"set": map[string]any{
+				"headers": cfg.Headers,
+			},
+		},
+	}}, nil
+}
+
+func isDisabledApisixPlugin(raw json.RawMessage) bool {
+	if len(raw) == 0 {
+		return false
+	}
+	var meta struct {
+		Meta struct {
+			Disable bool `json:"disable"`
+		} `json:"_meta"`
+	}
+	if err := json.Unmarshal(raw, &meta); err != nil {
+		return false
+	}
+	return meta.Meta.Disable
 }

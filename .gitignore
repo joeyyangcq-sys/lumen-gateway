@@ -7,3 +7,6 @@ coverage.out
 
 # local execution notes / plans
 ETCD_APISIX_EXECUTION_PLAN.md
+
+# local validation scripts / artifacts
+local/

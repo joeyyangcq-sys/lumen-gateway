@@ -38,3 +38,8 @@ type PluginConfig struct {
 	ID      ID              `json:"id"`
 	Plugins json.RawMessage `json:"plugins"`
 }
+
+type GlobalRule struct {
+	ID      ID              `json:"id"`
+	Plugins json.RawMessage `json:"plugins"`
+}

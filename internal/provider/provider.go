@@ -214,6 +214,15 @@ func (s *etcdApisixSource) applyKV(snapshot *apisix.Snapshot, key string, value 
 			resource.ID = apisix.ID(id)
 		}
 		snapshot.PluginConfig[id] = resource
+	case "global_rules":
+		resource := apisix.GlobalRule{}
+		if err := apisix.UnmarshalEtcdValue(value, &resource); err != nil {
+			return fmt.Errorf("decode global rule %q: %w", id, err)
+		}
+		if resource.ID == "" {
+			resource.ID = apisix.ID(id)
+		}
+		snapshot.GlobalRules[id] = resource
 	}
 
 	return nil

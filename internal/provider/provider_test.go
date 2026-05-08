@@ -13,6 +13,7 @@ func TestEtcdApisixSourceLoadBuildsGatewayOptions(t *testing.T) {
 		client: &fakeEtcdClient{
 			getResponses: []*clientv3.GetResponse{
 				{Kvs: []*mvccpb.KeyValue{
+					kv("/apisix/global_rules/1", `{"value":{"id":"1","plugins":{"response-rewrite":{"headers":{"X-Global":"true"}}}}}`),
 					kv("/apisix/upstreams/1", `{"value":{"id":"1","nodes":{"127.0.0.1:9001":1},"scheme":"http","pass_host":"rewrite","upstream_host":"users.internal"}}`),
 					kv("/apisix/services/1", `{"value":{"id":"1","upstream_id":"1"}}`),
 					kv("/apisix/routes/1", `{"value":{"id":"1","uri":"/users","service_id":"1"}}`),
@@ -46,6 +47,9 @@ func TestEtcdApisixSourceLoadBuildsGatewayOptions(t *testing.T) {
 	}
 	if got := options.Routes["1"].Service; got != "1" {
 		t.Fatalf("route service = %q, want 1", got)
+	}
+	if len(options.GlobalPlugins) != 1 || options.GlobalPlugins[0].Name != "response_transformer" {
+		t.Fatalf("global plugins = %#v, want translated response_transformer", options.GlobalPlugins)
 	}
 }
 
