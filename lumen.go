@@ -2,9 +2,13 @@ package lumen
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
 	"os"
+	"os/signal"
 	"runtime/debug"
+	"syscall"
 
 	"github.com/joey/lumen-gateway/internal/bootstrap"
 	"github.com/joey/lumen-gateway/internal/gateway"
@@ -103,7 +107,10 @@ func Run(opts ...Option) error {
 			}
 			defer source.Close()
 
-			initial, err := source.Load(context.Background())
+			runCtx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			initial, err := source.Load(runCtx)
 			if err != nil {
 				return err
 			}
@@ -113,19 +120,41 @@ func Run(opts ...Option) error {
 				return err
 			}
 
+			errCh := make(chan error, 2)
 			go func() {
-				_ = source.Watch(context.Background(), func(next provider.Update) {
+				errCh <- gw.Run()
+			}()
+			go func() {
+				errCh <- source.Watch(runCtx, func(next provider.Update) {
 					if next.Err != nil {
+						errCh <- next.Err
 						return
 					}
-					_ = gw.Reload(next.Options)
+					if err := gw.Reload(next.Options); err != nil {
+						errCh <- err
+					}
 				})
 			}()
 
-			return gw.Run()
+			sigCh := make(chan os.Signal, 1)
+			signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+			defer signal.Stop(sigCh)
+
+			select {
+			case sig := <-sigCh:
+				slog.Info("shutdown signal received", "signal", sig.String())
+				cancel()
+				return gw.Shutdown()
+			case err := <-errCh:
+				if errors.Is(err, context.Canceled) {
+					return nil
+				}
+				cancel()
+				_ = gw.Shutdown()
+				return err
+			}
 		},
 	}
 
 	return app.Run(os.Args)
 }
-
