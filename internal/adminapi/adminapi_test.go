@@ -68,14 +68,27 @@ func TestHandlerListGetPutDelete(t *testing.T) {
 	})
 
 	t.Run("put", func(t *testing.T) {
+		svc.getResult = controlplane.Envelope{}
+		svc.getErr = controlplane.ErrNotFound
+		c := newRequestContext("PUT", "/apisix/admin/routes/9", []byte(`{"uri":"/v9"}`))
+		c.Request.Header.Set("X-API-KEY", "secret")
+		handler.ServeHTTP(context.Background(), c)
+		if got := c.Response.StatusCode(); got != 201 {
+			t.Fatalf("status = %d, want 201", got)
+		}
+		if string(svc.lastBody) != `{"uri":"/v9"}` {
+			t.Fatalf("last body = %s", svc.lastBody)
+		}
+	})
+
+	t.Run("put update", func(t *testing.T) {
+		svc.getResult = controlplane.Envelope{Key: "/apisix/routes/9", Value: json.RawMessage(`{"id":"9","uri":"/old"}`)}
+		svc.getErr = nil
 		c := newRequestContext("PUT", "/apisix/admin/routes/9", []byte(`{"uri":"/v9"}`))
 		c.Request.Header.Set("X-API-KEY", "secret")
 		handler.ServeHTTP(context.Background(), c)
 		if got := c.Response.StatusCode(); got != 200 {
 			t.Fatalf("status = %d, want 200", got)
-		}
-		if string(svc.lastBody) != `{"uri":"/v9"}` {
-			t.Fatalf("last body = %s", svc.lastBody)
 		}
 	})
 

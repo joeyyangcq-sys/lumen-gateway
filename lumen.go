@@ -183,6 +183,7 @@ func adminCommand() *cli.Command {
 				Usage: "Import an APISIX-style bundle file into etcd",
 				Flags: []cli.Flag{
 					&cli.StringFlag{Name: "file", Aliases: []string{"f"}, Required: true, Usage: "Bundle file path"},
+					&cli.BoolFlag{Name: "prune", Usage: "Delete managed resources missing from the bundle for included kinds"},
 				},
 				Action: func(ctx *cli.Context) error {
 					boot, svc, err := loadControlPlaneService(ctx.String("config"))
@@ -197,7 +198,9 @@ func adminCommand() *cli.Command {
 					if err != nil {
 						return err
 					}
-					result, err := controlplane.ApplyBundle(ctx.Context, svc, bundle)
+					result, err := controlplane.ApplyBundleWithOptions(ctx.Context, svc, bundle, controlplane.ApplyOptions{
+						Prune: ctx.Bool("prune"),
+					})
 					if err != nil {
 						return err
 					}
@@ -238,6 +241,7 @@ func adminCommand() *cli.Command {
 				Flags: []cli.Flag{
 					&cli.StringFlag{Name: "file", Aliases: []string{"f"}, Required: true, Usage: "Bundle file path"},
 					&cli.BoolFlag{Name: "watch", Usage: "Keep polling the file and reapply on change"},
+					&cli.BoolFlag{Name: "prune", Usage: "Delete managed resources missing from the bundle for included kinds"},
 					&cli.DurationFlag{Name: "interval", Value: time.Second, Usage: "Poll interval when --watch is enabled"},
 				},
 				Action: func(ctx *cli.Context) error {
@@ -254,7 +258,9 @@ func adminCommand() *cli.Command {
 						if err != nil {
 							return err
 						}
-						result, err := controlplane.ApplyBundle(ctx.Context, svc, bundle)
+						result, err := controlplane.ApplyBundleWithOptions(ctx.Context, svc, bundle, controlplane.ApplyOptions{
+							Prune: ctx.Bool("prune"),
+						})
 						if err != nil {
 							return err
 						}
@@ -268,6 +274,7 @@ func adminCommand() *cli.Command {
 					fmt.Printf("watching bundle %s\n", ctx.String("file"))
 					return controlplane.SyncBundleFile(runCtx, svc, ctx.String("file"), controlplane.SyncOptions{
 						PollInterval: ctx.Duration("interval"),
+						Prune:        ctx.Bool("prune"),
 						OnApply:      printApplyResult,
 					})
 				},

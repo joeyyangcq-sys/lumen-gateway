@@ -46,6 +46,10 @@ type DeleteResult struct {
 	Deleted int64  `json:"deleted"`
 }
 
+type ApplyOptions struct {
+	Prune bool
+}
+
 type Store interface {
 	List(ctx context.Context, kind ResourceKind) ([]Envelope, error)
 	Get(ctx context.Context, kind ResourceKind, id string) (Envelope, error)

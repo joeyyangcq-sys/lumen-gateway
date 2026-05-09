@@ -21,6 +21,7 @@ type ApplyResult struct {
 
 type SyncOptions struct {
 	PollInterval time.Duration
+	Prune        bool
 	OnApply      func(ApplyResult)
 }
 
@@ -110,11 +111,18 @@ func (b FileBundle) ToYAML() ([]byte, error) {
 }
 
 func ApplyBundle(ctx context.Context, svc *Service, bundle FileBundle) (ApplyResult, error) {
+	return ApplyBundleWithOptions(ctx, svc, bundle, ApplyOptions{})
+}
+
+func ApplyBundleWithOptions(ctx context.Context, svc *Service, bundle FileBundle, options ApplyOptions) (ApplyResult, error) {
 	result := ApplyResult{Counts: make(map[ResourceKind]int)}
 	for _, kind := range applyOrder() {
 		group, ok := bundle.Resources[kind]
-		if !ok {
+		if !ok && !options.Prune {
 			continue
+		}
+		if !ok {
+			group = map[string]json.RawMessage{}
 		}
 		ids := make([]string, 0, len(group))
 		for id := range group {
@@ -126,6 +134,24 @@ func ApplyBundle(ctx context.Context, svc *Service, bundle FileBundle) (ApplyRes
 				return ApplyResult{}, fmt.Errorf("%s %s: %w", kind, id, err)
 			}
 			result.Counts[kind]++
+		}
+		if options.Prune {
+			items, err := svc.List(ctx, kind)
+			if err != nil {
+				return ApplyResult{}, err
+			}
+			for _, item := range items {
+				existingID, err := ExtractResourceID(item.Value)
+				if err != nil || existingID == "" {
+					continue
+				}
+				if _, keep := group[existingID]; keep {
+					continue
+				}
+				if _, err := svc.Delete(ctx, kind, existingID); err != nil {
+					return ApplyResult{}, fmt.Errorf("prune %s %s: %w", kind, existingID, err)
+				}
+			}
 		}
 	}
 	return result, nil
@@ -142,7 +168,7 @@ func SyncBundleFile(ctx context.Context, svc *Service, path string, options Sync
 		if err != nil {
 			return err
 		}
-		result, err := ApplyBundle(ctx, svc, bundle)
+		result, err := ApplyBundleWithOptions(ctx, svc, bundle, ApplyOptions{Prune: options.Prune})
 		if err != nil {
 			return err
 		}

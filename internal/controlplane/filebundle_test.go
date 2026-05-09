@@ -61,6 +61,36 @@ func TestApplyBundleUsesDependencyOrder(t *testing.T) {
 	}
 }
 
+func TestApplyBundleWithPruneDeletesMissingResources(t *testing.T) {
+	store := &pruneStore{
+		recordingStore: recordingStore{},
+		exportStore: exportStore{
+			listResults: map[ResourceKind][]Envelope{
+				KindRoute: {
+					{Key: "/apisix/routes/keep", Value: json.RawMessage(`{"id":"keep","uri":"/keep","service_id":"svc-1"}`)},
+					{Key: "/apisix/routes/drop", Value: json.RawMessage(`{"id":"drop","uri":"/drop","service_id":"svc-1"}`)},
+				},
+			},
+		},
+	}
+	svc := New(store)
+	bundle := FileBundle{
+		Resources: map[ResourceKind]map[string]json.RawMessage{
+			KindRoute: {
+				"keep": json.RawMessage(`{"id":"keep","uri":"/keep","service_id":"svc-1"}`),
+			},
+		},
+	}
+
+	_, err := ApplyBundleWithOptions(context.Background(), svc, bundle, ApplyOptions{Prune: true})
+	if err != nil {
+		t.Fatalf("ApplyBundleWithOptions() error = %v", err)
+	}
+	if len(store.deleted) != 1 || store.deleted[0] != "routes:drop" {
+		t.Fatalf("deleted = %#v, want routes:drop", store.deleted)
+	}
+}
+
 func TestExportBundleAndWriteFile(t *testing.T) {
 	svc := New(&exportStore{
 		listResults: map[ResourceKind][]Envelope{
@@ -183,4 +213,31 @@ type exportStore struct {
 
 func (s *exportStore) List(_ context.Context, kind ResourceKind) ([]Envelope, error) {
 	return s.listResults[kind], nil
+}
+
+type pruneStore struct {
+	recordingStore
+	exportStore
+	deleted []string
+}
+
+func (s *pruneStore) Put(ctx context.Context, kind ResourceKind, id string, body json.RawMessage) (Envelope, error) {
+	return s.recordingStore.Put(ctx, kind, id, body)
+}
+
+func (s *pruneStore) List(ctx context.Context, kind ResourceKind) ([]Envelope, error) {
+	return s.exportStore.List(ctx, kind)
+}
+
+func (s *pruneStore) Get(ctx context.Context, kind ResourceKind, id string) (Envelope, error) {
+	return s.recordingStore.Get(ctx, kind, id)
+}
+
+func (s *pruneStore) Delete(_ context.Context, kind ResourceKind, id string) (DeleteResult, error) {
+	s.deleted = append(s.deleted, string(kind)+":"+id)
+	return DeleteResult{Key: "/apisix/" + string(kind) + "/" + id, Deleted: 1}, nil
+}
+
+func (s *pruneStore) Close() error {
+	return nil
 }

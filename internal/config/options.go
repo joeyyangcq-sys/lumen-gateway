@@ -151,9 +151,6 @@ func (o Options) Validate() error {
 	if len(o.Servers) == 0 {
 		return errors.New("at least one server is required")
 	}
-	if len(o.Routes) == 0 {
-		return errors.New("at least one route is required")
-	}
 
 	for id, server := range o.Servers {
 		if server.Listen == "" {

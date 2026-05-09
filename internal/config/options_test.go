@@ -13,6 +13,15 @@ func TestValidateAcceptsMinimalGatewayConfig(t *testing.T) {
 	}
 }
 
+func TestValidateAllowsEmptyRoutes(t *testing.T) {
+	options := minimalOptions()
+	options.Routes = map[string]RouteOptions{}
+
+	if err := options.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+}
+
 func TestValidateRejectsUnknownServiceReference(t *testing.T) {
 	options := minimalOptions()
 	route := options.Routes["user-api"]

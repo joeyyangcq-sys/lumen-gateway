@@ -103,7 +103,7 @@ func (s *EtcdStore) Put(ctx context.Context, kind ResourceKind, id string, body 
 	if _, err := s.client.Put(ctx, key, string(body)); err != nil {
 		return Envelope{}, err
 	}
-	return Envelope{Key: key, Value: body}, nil
+	return s.Get(ctx, kind, id)
 }
 
 func (s *EtcdStore) Delete(ctx context.Context, kind ResourceKind, id string) (DeleteResult, error) {

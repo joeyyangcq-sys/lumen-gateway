@@ -134,12 +134,25 @@ func (h *Handler) handleGet(ctx context.Context, c *app.RequestContext, kind con
 }
 
 func (h *Handler) handlePut(ctx context.Context, c *app.RequestContext, kind controlplane.ResourceKind, id string) {
+	if id == "" {
+		writeError(c, http.StatusBadRequest, "resource id is required")
+		return
+	}
+	status := http.StatusOK
+	if _, err := h.service.Get(ctx, kind, id); err != nil {
+		if errors.Is(err, controlplane.ErrNotFound) {
+			status = http.StatusCreated
+		} else {
+			writeMappedError(c, err)
+			return
+		}
+	}
 	item, err := h.service.Put(ctx, kind, id, c.Request.Body())
 	if err != nil {
 		writeMappedError(c, err)
 		return
 	}
-	writeJSON(c, http.StatusOK, item)
+	writeJSON(c, status, item)
 }
 
 func (h *Handler) handlePost(ctx context.Context, c *app.RequestContext, kind controlplane.ResourceKind) {
@@ -198,7 +211,7 @@ func writeMappedError(c *app.RequestContext, err error) {
 	}
 }
 
-func writeJSON(c *app.RequestContext, status int, payload any) {
+func writeAPISIXBody(c *app.RequestContext, status int, payload any) {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		writeError(c, http.StatusInternalServerError, err.Error())
@@ -207,6 +220,10 @@ func writeJSON(c *app.RequestContext, status int, payload any) {
 	c.Response.Header.Set("Content-Type", "application/json")
 	c.Response.SetStatusCode(status)
 	c.Response.SetBodyRaw(body)
+}
+
+func writeJSON(c *app.RequestContext, status int, payload any) {
+	writeAPISIXBody(c, status, payload)
 }
 
 func writeError(c *app.RequestContext, status int, message string) {
