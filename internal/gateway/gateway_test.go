@@ -11,6 +11,7 @@ import (
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/joey/lumen-gateway/internal/config"
+	"github.com/joey/lumen-gateway/internal/observability"
 	"github.com/joey/lumen-gateway/internal/plugin"
 	"github.com/joey/lumen-gateway/internal/proxy"
 )
@@ -30,8 +31,8 @@ func TestBuildSnapshotBuildsPluginChainsForAllScopes(t *testing.T) {
 	if len(snapshot.RouteHandlers["user-api"]) != 2 {
 		t.Fatalf("route handlers = %d, want 2", len(snapshot.RouteHandlers["user-api"]))
 	}
-	if len(snapshot.Services["user-service"].Handlers) != 1 {
-		t.Fatalf("service handlers = %d, want 1", len(snapshot.Services["user-service"].Handlers))
+	if len(snapshot.Services["user-service"].Handlers) != 2 {
+		t.Fatalf("service handlers = %d, want 2", len(snapshot.Services["user-service"].Handlers))
 	}
 	if len(snapshot.Upstreams["user-upstream"].Handlers) != 1 {
 		t.Fatalf("upstream handlers = %d, want 1", len(snapshot.Upstreams["user-upstream"].Handlers))
@@ -84,6 +85,9 @@ func TestServeHTTPProxiesToMatchedUpstream(t *testing.T) {
 	if got := gotQuery.Get("matched_route"); got != "user-api" {
 		t.Fatalf("matched_route query = %q, want user-api", got)
 	}
+	if got := gotQuery.Get("service"); got != "user-service" {
+		t.Fatalf("service query = %q, want user-service", got)
+	}
 	if got := gotQuery.Get("upstream"); got != "user-upstream" {
 		t.Fatalf("upstream query = %q, want user-upstream", got)
 	}
@@ -95,6 +99,12 @@ func TestServeHTTPProxiesToMatchedUpstream(t *testing.T) {
 	}
 	if got := c.Response.Header.Get("X-Service"); got != "user-service" {
 		t.Fatalf("X-Service = %q, want user-service", got)
+	}
+	if got := c.Response.Header.Get("X-Upstream-Host"); got != "users.internal" {
+		t.Fatalf("X-Upstream-Host = %q, want users.internal", got)
+	}
+	if got := c.Response.Header.Get("X-Endpoint"); got != "127.0.0.1:9001" {
+		t.Fatalf("X-Endpoint = %q, want 127.0.0.1:9001", got)
 	}
 }
 
@@ -183,6 +193,50 @@ func TestServeHTTPReturnsNotFoundForUnknownRoute(t *testing.T) {
 	}
 }
 
+func TestServeHTTPExposesMetricsEndpoint(t *testing.T) {
+	previous := observability.Default()
+	recorder := observability.NewMemoryRecorder()
+	observability.SetDefault(recorder)
+	defer observability.SetDefault(previous)
+
+	gw, err := New(gatewayOptions("127.0.0.1:9001"))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	installTransport(gw, roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader("ok")),
+		}, nil
+	}))
+
+	request := app.NewContext(0)
+	request.Request.SetMethod("GET")
+	request.Request.SetHost("original.test")
+	request.Request.URI().SetPath("/api/users")
+	gw.ServeHTTP(context.Background(), request)
+
+	metrics := app.NewContext(0)
+	metrics.Request.SetMethod("GET")
+	metrics.Request.URI().SetPath("/metrics")
+	gw.ServeHTTP(context.Background(), metrics)
+
+	body := string(metrics.Response.Body())
+	if metrics.Response.StatusCode() != 200 {
+		t.Fatalf("metrics status = %d, want 200", metrics.Response.StatusCode())
+	}
+	if !strings.Contains(body, `lumen_plugin_executions_total{phase="request",plugin="request_transformer"`) {
+		t.Fatalf("metrics body missing plugin execution metric:\n%s", body)
+	}
+	if !strings.Contains(body, `lumen_upstream_requests_total`) {
+		t.Fatalf("metrics body missing upstream request metric:\n%s", body)
+	}
+	if !strings.Contains(body, `phase="total"`) {
+		t.Fatalf("metrics body missing upstream total phase metric:\n%s", body)
+	}
+}
+
 func TestBuildPluginHandlersOrdersByPriority(t *testing.T) {
 	registry := plugin.NewRegistry()
 	mustRegisterPlugin(t, registry, plugin.Metadata{
@@ -251,7 +305,11 @@ func gatewayOptions(endpointAddress string) config.Options {
 			Name: "response_transformer",
 			Params: map[string]any{
 				"add": map[string]any{
-					"headers": map[string]string{"X-Global": "true"},
+					"headers": map[string]string{
+						"X-Global":        "true",
+						"X-Upstream-Host": "$upstream_host",
+						"X-Endpoint":      "$endpoint_addr",
+					},
 				},
 			},
 		}},
@@ -261,7 +319,7 @@ func gatewayOptions(endpointAddress string) config.Options {
 				Name: "response_transformer",
 				Params: map[string]any{
 					"set": map[string]any{
-						"headers": map[string]string{"X-Service": "user-service"},
+						"headers": map[string]string{"X-Service": "$service_id"},
 					},
 				},
 			},
@@ -298,7 +356,7 @@ func gatewayOptions(endpointAddress string) config.Options {
 						Params: map[string]any{
 							"host": "users.internal",
 							"set": map[string]any{
-								"query": map[string]string{"matched_route": "user-api"},
+								"query": map[string]string{"matched_route": "$route_id"},
 							},
 						},
 					},
@@ -311,6 +369,14 @@ func gatewayOptions(endpointAddress string) config.Options {
 				Protocol: "http",
 				Upstream: "user-upstream",
 				Plugins: []config.PluginRef{
+					{
+						Name: "request_transformer",
+						Params: map[string]any{
+							"set": map[string]any{
+								"query": map[string]string{"service": "$service_id"},
+							},
+						},
+					},
 					{Use: "service-marker"},
 				},
 			},
@@ -327,7 +393,7 @@ func gatewayOptions(endpointAddress string) config.Options {
 					Name: "request_transformer",
 					Params: map[string]any{
 						"add": map[string]any{
-							"query": map[string]string{"upstream": "user-upstream"},
+							"query": map[string]string{"upstream": "$upstream_id"},
 						},
 					},
 				}},

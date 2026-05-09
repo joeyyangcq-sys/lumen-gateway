@@ -26,12 +26,19 @@ type Service struct {
 }
 
 type Upstream struct {
-	ID           ID              `json:"id"`
-	Type         string          `json:"type"`
-	Scheme       string          `json:"scheme"`
-	PassHost     string          `json:"pass_host"`
-	UpstreamHost string          `json:"upstream_host"`
-	Nodes        json.RawMessage `json:"nodes"`
+	ID           ID               `json:"id"`
+	Type         string           `json:"type"`
+	Scheme       string           `json:"scheme"`
+	PassHost     string           `json:"pass_host"`
+	UpstreamHost string           `json:"upstream_host"`
+	Timeout      *UpstreamTimeout `json:"timeout"`
+	Nodes        json.RawMessage  `json:"nodes"`
+}
+
+type UpstreamTimeout struct {
+	Connect json.Number `json:"connect"`
+	Send    json.Number `json:"send"`
+	Read    json.Number `json:"read"`
 }
 
 type PluginConfig struct {

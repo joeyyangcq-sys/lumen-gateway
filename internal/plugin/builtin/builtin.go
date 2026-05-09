@@ -8,9 +8,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/joey/lumen-gateway/internal/plugin"
-	"github.com/joey/lumen-gateway/internal/runtimectx"
 )
 
 func Register(registry *plugin.Registry) error {
@@ -50,51 +48,49 @@ type requestTransformerConfig struct {
 }
 
 func registerRequestTransformer(registry *plugin.Registry) error {
-	return plugin.RegisterTyped(registry, plugin.Metadata{
+	return plugin.RegisterTypedContext(registry, plugin.Metadata{
 		Name:     "request_transformer",
 		Priority: 100,
 		Scopes:   plugin.AllScopes(),
-	}, func(cfg requestTransformerConfig) (app.HandlerFunc, error) {
-		return func(ctx context.Context, c *app.RequestContext) {
+	}, func(cfg requestTransformerConfig) (plugin.ContextHandler, error) {
+		return func(ctx context.Context, pc plugin.PluginContext) {
 			if cfg.Method != "" {
-				c.Request.SetMethod(strings.ToUpper(strings.TrimSpace(renderRequestTemplate(c, cfg.Method))))
+				pc.SetRequestMethod(strings.ToUpper(strings.TrimSpace(renderRequestTemplate(pc, cfg.Method))))
 			}
 			if cfg.Host != "" {
-				host := renderRequestTemplate(c, cfg.Host)
-				c.Request.SetHost(host)
-				c.Request.Header.SetHost(host)
+				pc.SetRequestHost(renderRequestTemplate(pc, cfg.Host))
 			}
 			for key, value := range cfg.Add.Headers {
 				if key != "" {
-					c.Request.Header.Add(key, renderRequestTemplate(c, value))
+					pc.AddRequestHeader(key, renderRequestTemplate(pc, value))
 				}
 			}
 			for key, value := range cfg.Add.Query {
 				if key != "" {
-					c.Request.URI().QueryArgs().Add(key, renderRequestTemplate(c, value))
+					pc.AddRequestQuery(key, renderRequestTemplate(pc, value))
 				}
 			}
 			for _, header := range cfg.Remove.Headers {
 				if header != "" {
-					c.Request.Header.Del(header)
+					pc.DelRequestHeader(header)
 				}
 			}
 			for _, key := range cfg.Remove.Query {
 				if key != "" {
-					c.Request.URI().QueryArgs().Del(key)
+					pc.DelRequestQuery(key)
 				}
 			}
 			for key, value := range cfg.Set.Headers {
 				if key != "" {
-					c.Request.Header.Set(key, renderRequestTemplate(c, value))
+					pc.SetRequestHeader(key, renderRequestTemplate(pc, value))
 				}
 			}
 			for key, value := range cfg.Set.Query {
 				if key != "" {
-					c.Request.URI().QueryArgs().Set(key, renderRequestTemplate(c, value))
+					pc.SetRequestQuery(key, renderRequestTemplate(pc, value))
 				}
 			}
-			c.Next(ctx)
+			pc.Next(ctx)
 		}, nil
 	})
 }
@@ -109,11 +105,11 @@ type rewritePathRegexRule struct {
 }
 
 func registerRewritePathRegex(registry *plugin.Registry) error {
-	return plugin.RegisterTyped(registry, plugin.Metadata{
+	return plugin.RegisterTypedContext(registry, plugin.Metadata{
 		Name:     "rewrite_path_regex",
 		Priority: 0,
 		Scopes:   plugin.AllScopes(),
-	}, func(cfg rewritePathRegexConfig) (app.HandlerFunc, error) {
+	}, func(cfg rewritePathRegexConfig) (plugin.ContextHandler, error) {
 		if len(cfg.Rules) == 0 {
 			return nil, errors.New("rewrite_path_regex requires at least one rule")
 		}
@@ -138,22 +134,22 @@ func registerRewritePathRegex(registry *plugin.Registry) error {
 			})
 		}
 
-		return func(ctx context.Context, c *app.RequestContext) {
-			path := string(c.Path())
+		return func(ctx context.Context, pc plugin.PluginContext) {
+			path := pc.RequestPath()
 			for _, rule := range rules {
 				matches := rule.regex.FindStringSubmatch(path)
 				if len(matches) == 0 {
 					continue
 				}
-				c.Set(runtimectx.RegexCapturesKey, matches[1:])
-				rewritten := renderRequestTemplate(c, rule.regex.ReplaceAllString(path, rule.replacement))
+				pc.SetRegexCaptures(matches[1:])
+				rewritten := renderRequestTemplate(pc, rule.regex.ReplaceAllString(path, rule.replacement))
 				if rewritten != "" && !strings.HasPrefix(rewritten, "/") {
 					rewritten = "/" + rewritten
 				}
-				c.Request.URI().SetPath(rewritten)
+				pc.SetRequestPath(rewritten)
 				break
 			}
-			c.Next(ctx)
+			pc.Next(ctx)
 		}, nil
 	})
 }
@@ -175,11 +171,11 @@ type responseTransformerConfig struct {
 }
 
 func registerResponseTransformer(registry *plugin.Registry) error {
-	return plugin.RegisterTyped(registry, plugin.Metadata{
+	return plugin.RegisterTypedContext(registry, plugin.Metadata{
 		Name:     "response_transformer",
 		Priority: 0,
 		Scopes:   plugin.AllScopes(),
-	}, func(cfg responseTransformerConfig) (app.HandlerFunc, error) {
+	}, func(cfg responseTransformerConfig) (plugin.ContextHandler, error) {
 		body := cfg.Body
 		if cfg.BodyBase64 && body != "" {
 			decoded, err := base64.StdEncoding.DecodeString(body)
@@ -188,31 +184,31 @@ func registerResponseTransformer(registry *plugin.Registry) error {
 			}
 			body = string(decoded)
 		}
-		return func(ctx context.Context, c *app.RequestContext) {
-			c.Next(ctx)
+		return func(ctx context.Context, pc plugin.PluginContext) {
+			pc.Next(ctx)
 			for _, header := range cfg.Remove.Headers {
 				if header != "" {
-					c.Response.Header.Del(header)
+					pc.DelResponseHeader(header)
 				}
 			}
 			for key, value := range cfg.Add.Headers {
 				if key != "" {
-					c.Response.Header.Add(key, renderRequestTemplate(c, value))
+					pc.AddResponseHeader(key, renderRequestTemplate(pc, value))
 				}
 			}
 			for key, value := range cfg.Set.Headers {
 				if key != "" {
-					c.Response.Header.Set(key, renderRequestTemplate(c, value))
+					pc.SetResponseHeader(key, renderRequestTemplate(pc, value))
 				}
 			}
 			if cfg.Status > 0 {
-				c.Response.SetStatusCode(cfg.Status)
+				pc.SetResponseStatus(cfg.Status)
 			}
 			if body != "" {
 				if cfg.ContentType != "" {
-					c.Response.Header.Set("Content-Type", cfg.ContentType)
+					pc.SetResponseHeader("Content-Type", cfg.ContentType)
 				}
-				c.Response.SetBodyString(renderRequestTemplate(c, body))
+				pc.SetResponseBody([]byte(renderRequestTemplate(pc, body)))
 			}
 		}, nil
 	})
@@ -223,21 +219,21 @@ type replacePathConfig struct {
 }
 
 func registerReplacePath(registry *plugin.Registry) error {
-	return plugin.RegisterTyped(registry, plugin.Metadata{
+	return plugin.RegisterTypedContext(registry, plugin.Metadata{
 		Name:     "replace_path",
 		Priority: 0,
 		Scopes:   plugin.AllScopes(),
-	}, func(cfg replacePathConfig) (app.HandlerFunc, error) {
+	}, func(cfg replacePathConfig) (plugin.ContextHandler, error) {
 		if cfg.Path == "" {
 			return nil, errors.New("replace_path requires path")
 		}
-		return func(ctx context.Context, c *app.RequestContext) {
-			path := renderRequestTemplate(c, cfg.Path)
+		return func(ctx context.Context, pc plugin.PluginContext) {
+			path := renderRequestTemplate(pc, cfg.Path)
 			if !strings.HasPrefix(path, "/") {
 				path = "/" + path
 			}
-			c.Request.URI().SetPath(path)
-			c.Next(ctx)
+			pc.SetRequestPath(path)
+			pc.Next(ctx)
 		}, nil
 	})
 }
@@ -248,11 +244,11 @@ type stripPrefixConfig struct {
 }
 
 func registerStripPrefix(registry *plugin.Registry) error {
-	return plugin.RegisterTyped(registry, plugin.Metadata{
+	return plugin.RegisterTypedContext(registry, plugin.Metadata{
 		Name:     "strip_prefix",
 		Priority: 0,
 		Scopes:   plugin.AllScopes(),
-	}, func(cfg stripPrefixConfig) (app.HandlerFunc, error) {
+	}, func(cfg stripPrefixConfig) (plugin.ContextHandler, error) {
 		prefixes := cfg.Prefixes
 		if cfg.Prefix != "" {
 			prefixes = append(prefixes, cfg.Prefix)
@@ -264,17 +260,18 @@ func registerStripPrefix(registry *plugin.Registry) error {
 		for _, prefix := range prefixes {
 			rawPrefixes = append(rawPrefixes, []byte(prefix))
 		}
-		return func(ctx context.Context, c *app.RequestContext) {
+		return func(ctx context.Context, pc plugin.PluginContext) {
+			raw := pc.Raw()
 			for _, prefix := range rawPrefixes {
-				if after, ok := bytes.CutPrefix(c.Request.Path(), prefix); ok {
+				if after, ok := bytes.CutPrefix(raw.Request.Path(), prefix); ok {
 					if len(after) == 0 {
 						after = []byte("/")
 					}
-					c.Request.URI().SetPathBytes(after)
+					raw.Request.URI().SetPathBytes(after)
 					break
 				}
 			}
-			c.Next(ctx)
+			pc.Next(ctx)
 		}, nil
 	})
 }
@@ -284,25 +281,25 @@ type addPrefixConfig struct {
 }
 
 func registerAddPrefix(registry *plugin.Registry) error {
-	return plugin.RegisterTyped(registry, plugin.Metadata{
+	return plugin.RegisterTypedContext(registry, plugin.Metadata{
 		Name:     "add_prefix",
 		Priority: 0,
 		Scopes:   plugin.AllScopes(),
-	}, func(cfg addPrefixConfig) (app.HandlerFunc, error) {
+	}, func(cfg addPrefixConfig) (plugin.ContextHandler, error) {
 		if cfg.Prefix == "" {
 			return nil, errors.New("add_prefix requires prefix")
 		}
 		if !strings.HasPrefix(cfg.Prefix, "/") {
 			cfg.Prefix = "/" + cfg.Prefix
 		}
-		return func(ctx context.Context, c *app.RequestContext) {
-			path := string(c.Request.Path())
+		return func(ctx context.Context, pc plugin.PluginContext) {
+			path := pc.RequestPath()
 			if path == "/" {
-				c.Request.URI().SetPath(renderRequestTemplate(c, cfg.Prefix))
+				pc.SetRequestPath(renderRequestTemplate(pc, cfg.Prefix))
 			} else {
-				c.Request.URI().SetPath(renderRequestTemplate(c, cfg.Prefix) + path)
+				pc.SetRequestPath(renderRequestTemplate(pc, cfg.Prefix) + path)
 			}
-			c.Next(ctx)
+			pc.Next(ctx)
 		}, nil
 	})
 }

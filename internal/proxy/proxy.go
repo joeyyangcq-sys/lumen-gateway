@@ -3,16 +3,21 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"strings"
 	"time"
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/joey/lumen-gateway/internal/config"
+	"github.com/joey/lumen-gateway/internal/observability"
+	"github.com/joey/lumen-gateway/internal/plugin"
 )
 
 var (
@@ -44,8 +49,10 @@ func NewHTTP(options HTTPOptions) *HTTPProxy {
 	transport := options.Transport
 	if transport == nil {
 		defaultTransport := &http.Transport{
-			Proxy:             http.ProxyFromEnvironment,
-			ForceAttemptHTTP2: true,
+			Proxy:                 http.ProxyFromEnvironment,
+			ForceAttemptHTTP2:     true,
+			ResponseHeaderTimeout: options.Timeout.Read,
+			TLSHandshakeTimeout:   options.Timeout.Connect,
 		}
 		if options.Timeout.Connect > 0 {
 			dialer := &net.Dialer{Timeout: options.Timeout.Connect}
@@ -68,14 +75,20 @@ func (p *HTTPProxy) ServeHTTP(ctx context.Context, c *app.RequestContext, target
 		return err
 	}
 
+	timings := newTraceTimings(target)
+	req = req.WithContext(httptrace.WithClientTrace(req.Context(), timings.clientTrace()))
 	resp, err := p.client.Do(req)
+	timings.finishRoundTrip(err)
 	if err != nil {
+		recordUpstreamObservation(c, target, timings.snapshot(), 0, classifyErrorType(err, timings))
 		return classifyRequestError(err)
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
+	timings.finishBodyRead()
 	if err != nil {
+		recordUpstreamObservation(c, target, timings.snapshot(), resp.StatusCode, classifyErrorType(err, timings))
 		return classifyRequestError(err)
 	}
 
@@ -90,6 +103,7 @@ func (p *HTTPProxy) ServeHTTP(ctx context.Context, c *app.RequestContext, target
 		}
 	}
 	c.Response.SetBodyRaw(body)
+	recordUpstreamObservation(c, target, timings.snapshot(), resp.StatusCode, "")
 	return nil
 }
 
@@ -189,4 +203,157 @@ func isHopByHopHeader(key string) bool {
 	default:
 		return false
 	}
+}
+
+type traceTimings struct {
+	target observability.ProxyInfo
+
+	start time.Time
+
+	connectStart      time.Time
+	connectDone       time.Time
+	tlsHandshakeStart time.Time
+	tlsHandshakeDone  time.Time
+	gotConnAt         time.Time
+	wroteRequestAt    time.Time
+	firstByteAt       time.Time
+	bodyReadDoneAt    time.Time
+
+	connectErr error
+	tlsErr     error
+	writeErr   error
+	reusedConn bool
+}
+
+func newTraceTimings(target Target) *traceTimings {
+	return &traceTimings{
+		target: observability.ProxyInfo{
+			Scheme:  target.Scheme,
+			Address: target.Address,
+			Host:    target.Host,
+		},
+		start: time.Now(),
+	}
+}
+
+func (t *traceTimings) clientTrace() *httptrace.ClientTrace {
+	return &httptrace.ClientTrace{
+		GotConn: func(info httptrace.GotConnInfo) {
+			t.reusedConn = info.Reused
+			t.gotConnAt = time.Now()
+		},
+		ConnectStart: func(_, _ string) {
+			t.connectStart = time.Now()
+		},
+		ConnectDone: func(_, _ string, err error) {
+			t.connectDone = time.Now()
+			t.connectErr = err
+		},
+		TLSHandshakeStart: func() {
+			t.tlsHandshakeStart = time.Now()
+		},
+		TLSHandshakeDone: func(_ tls.ConnectionState, err error) {
+			t.tlsHandshakeDone = time.Now()
+			t.tlsErr = err
+		},
+		WroteRequest: func(info httptrace.WroteRequestInfo) {
+			t.wroteRequestAt = time.Now()
+			t.writeErr = info.Err
+		},
+		GotFirstResponseByte: func() {
+			t.firstByteAt = time.Now()
+		},
+	}
+}
+
+func (t *traceTimings) finishRoundTrip(err error) {
+	if err == nil && t.firstByteAt.IsZero() {
+		t.firstByteAt = time.Now()
+	}
+}
+
+func (t *traceTimings) finishBodyRead() {
+	t.bodyReadDoneAt = time.Now()
+}
+
+func (t *traceTimings) snapshot() observability.ProxyInfo {
+	info := t.target
+	info.ReusedConnection = t.reusedConn
+
+	if !t.connectStart.IsZero() && !t.connectDone.IsZero() {
+		info.ConnectTime = t.connectDone.Sub(t.connectStart)
+	}
+	if !t.tlsHandshakeStart.IsZero() && !t.tlsHandshakeDone.IsZero() {
+		info.TLSHandshakeTime = t.tlsHandshakeDone.Sub(t.tlsHandshakeStart)
+	}
+	writeStart := t.gotConnAt
+	if writeStart.IsZero() {
+		writeStart = t.start
+	}
+	if !t.tlsHandshakeDone.IsZero() {
+		writeStart = t.tlsHandshakeDone
+	}
+	if !t.wroteRequestAt.IsZero() {
+		info.RequestWriteTime = t.wroteRequestAt.Sub(writeStart)
+	}
+	if !t.wroteRequestAt.IsZero() && !t.firstByteAt.IsZero() {
+		info.FirstByteTime = t.firstByteAt.Sub(t.wroteRequestAt)
+		info.ProcessingEstimate = info.FirstByteTime
+	}
+	end := t.bodyReadDoneAt
+	if end.IsZero() {
+		end = time.Now()
+	}
+	if !t.firstByteAt.IsZero() {
+		info.ResponseReadTime = end.Sub(t.firstByteAt)
+	}
+	info.TotalTime = end.Sub(t.start)
+	return info
+}
+
+func classifyErrorType(err error, timings *traceTimings) string {
+	switch {
+	case timings.connectErr != nil:
+		return "connect_error"
+	case timings.tlsErr != nil:
+		return "tls_error"
+	case timings.writeErr != nil:
+		return "write_error"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "timeout"
+	default:
+		var netErr net.Error
+		if errors.As(err, &netErr) && netErr.Timeout() {
+			return "timeout"
+		}
+		if !timings.firstByteAt.IsZero() {
+			return "read_error"
+		}
+		return "bad_gateway"
+	}
+}
+
+func recordUpstreamObservation(c *app.RequestContext, target Target, info observability.ProxyInfo, status int, errorType string) {
+	plugin.SetProxyInfo(c, info)
+	if status > 0 {
+		plugin.SetUpstreamStatusCode(c, status)
+	}
+
+	statusClass := ""
+	if status > 0 {
+		statusClass = fmt.Sprintf("%dxx", status/100)
+	}
+
+	pc := plugin.FromRequestContext(c)
+	observability.Default().ObserveUpstream(observability.UpstreamLabels{
+		RouteID:     pc.RouteID(),
+		ServiceID:   pc.ServiceID(),
+		UpstreamID:  pc.UpstreamID(),
+		Endpoint:    info.Address,
+		Scheme:      target.Scheme,
+		Method:      pc.RequestMethod(),
+		StatusClass: statusClass,
+		ErrorType:   errorType,
+		ReusedConn:  info.ReusedConnection,
+	}, info)
 }

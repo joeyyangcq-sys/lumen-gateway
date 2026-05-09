@@ -9,9 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/joey/lumen-gateway/internal/plugin"
-	"github.com/joey/lumen-gateway/internal/runtimectx"
 )
 
 type requestIDConfig struct {
@@ -25,11 +23,11 @@ type requestIDConfig struct {
 }
 
 func registerRequestID(registry *plugin.Registry) error {
-	return plugin.RegisterTyped(registry, plugin.Metadata{
+	return plugin.RegisterTypedContext(registry, plugin.Metadata{
 		Name:     "request_id",
 		Priority: 1200,
 		Scopes:   plugin.AllScopes(),
-	}, func(cfg requestIDConfig) (app.HandlerFunc, error) {
+	}, func(cfg requestIDConfig) (plugin.ContextHandler, error) {
 		headerName := strings.TrimSpace(cfg.HeaderName)
 		if headerName == "" {
 			headerName = "X-Request-Id"
@@ -50,18 +48,18 @@ func registerRequestID(registry *plugin.Registry) error {
 			return nil, err
 		}
 
-		return func(ctx context.Context, c *app.RequestContext) {
-			requestID := strings.TrimSpace(c.Request.Header.Get(headerName))
+		return func(ctx context.Context, pc plugin.PluginContext) {
+			requestID := strings.TrimSpace(pc.RequestHeader(headerName))
 			if requestID == "" {
 				requestID = generate()
-				c.Request.Header.Set(headerName, requestID)
+				pc.SetRequestHeader(headerName, requestID)
 			}
 
-			c.Set(runtimectx.RequestIDKey, requestID)
-			c.Next(ctx)
+			pc.SetRequestID(requestID)
+			pc.Next(ctx)
 
 			if includeInResponse {
-				c.Response.Header.Set(headerName, requestID)
+				pc.SetResponseHeader(headerName, requestID)
 			}
 		}, nil
 	})

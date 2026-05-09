@@ -1,40 +1,13 @@
 package builtin
 
 import (
-	"fmt"
 	"net"
-	"strconv"
 	"strings"
 
-	"github.com/cloudwego/hertz/pkg/app"
-	"github.com/joey/lumen-gateway/internal/runtimectx"
+	"github.com/joey/lumen-gateway/internal/plugin"
 )
 
-func regexCapturesFromContext(c *app.RequestContext) []string {
-	value, ok := c.Get(runtimectx.RegexCapturesKey)
-	if !ok {
-		return nil
-	}
-	captures, ok := value.([]string)
-	if !ok {
-		return nil
-	}
-	return captures
-}
-
-func requestIDFromContext(c *app.RequestContext) string {
-	value, ok := c.Get(runtimectx.RequestIDKey)
-	if !ok {
-		return ""
-	}
-	id, ok := value.(string)
-	if !ok {
-		return ""
-	}
-	return id
-}
-
-func renderRequestTemplate(c *app.RequestContext, value string) string {
+func renderRequestTemplate(pc plugin.PluginContext, value string) string {
 	if value == "" || !strings.Contains(value, "$") {
 		return value
 	}
@@ -60,14 +33,14 @@ func renderRequestTemplate(c *app.RequestContext, value string) string {
 			for end < len(value) && value[end] >= '0' && value[end] <= '9' {
 				end++
 			}
-			builder.WriteString(resolveRequestVariable(c, value[index+1:end]))
+			builder.WriteString(resolveRequestVariable(pc, value[index+1:end]))
 			index = end - 1
 		case isVariableChar(next):
 			end := index + 2
 			for end < len(value) && isVariableChar(value[end]) {
 				end++
 			}
-			builder.WriteString(resolveRequestVariable(c, value[index+1:end]))
+			builder.WriteString(resolveRequestVariable(pc, value[index+1:end]))
 			index = end - 1
 		default:
 			builder.WriteByte(value[index])
@@ -77,13 +50,14 @@ func renderRequestTemplate(c *app.RequestContext, value string) string {
 	return builder.String()
 }
 
-func resolveRequestVariable(c *app.RequestContext, variable string) string {
+func resolveRequestVariable(pc plugin.PluginContext, variable string) string {
 	if variable == "" {
 		return ""
 	}
 
-	if index, err := strconv.Atoi(variable); err == nil {
-		captures := regexCapturesFromContext(c)
+	if isNumeric(variable) {
+		index := atoi(variable)
+		captures := pc.RegexCaptures()
 		if index >= 1 && index <= len(captures) {
 			return captures[index-1]
 		}
@@ -92,20 +66,16 @@ func resolveRequestVariable(c *app.RequestContext, variable string) string {
 
 	switch variable {
 	case "host":
-		return string(c.Host())
+		return pc.RequestHost()
 	case "uri":
-		return string(c.Path())
+		return pc.RequestPath()
 	case "request_uri":
-		query := string(c.Request.URI().QueryArgs().QueryString())
-		if query == "" {
-			return string(c.Path())
-		}
-		return fmt.Sprintf("%s?%s", c.Path(), query)
+		return pc.RequestURI()
 	case "remote_addr":
-		if ip := c.ClientIP(); ip != "" {
+		if ip := pc.ClientIP(); ip != "" {
 			return ip
 		}
-		if addr := c.RemoteAddr(); addr != nil {
+		if addr := pc.Raw().RemoteAddr(); addr != nil {
 			host, _, err := net.SplitHostPort(addr.String())
 			if err == nil {
 				return host
@@ -114,15 +84,25 @@ func resolveRequestVariable(c *app.RequestContext, variable string) string {
 		}
 		return ""
 	case "request_id":
-		return requestIDFromContext(c)
+		return pc.RequestID()
+	case "route_id":
+		return pc.RouteID()
+	case "service_id":
+		return pc.ServiceID()
+	case "upstream_id":
+		return pc.UpstreamID()
+	case "upstream_host":
+		return pc.UpstreamHost()
+	case "endpoint_addr":
+		return pc.EndpointAddress()
 	}
 
 	if strings.HasPrefix(variable, "arg_") {
-		return string(c.Query(strings.TrimPrefix(variable, "arg_")))
+		return pc.RequestQuery(strings.TrimPrefix(variable, "arg_"))
 	}
 	if strings.HasPrefix(variable, "http_") {
 		headerName := strings.ReplaceAll(strings.TrimPrefix(variable, "http_"), "_", "-")
-		return c.Request.Header.Get(headerName)
+		return pc.RequestHeader(headerName)
 	}
 
 	return ""
@@ -133,4 +113,21 @@ func isVariableChar(ch byte) bool {
 		(ch >= 'a' && ch <= 'z') ||
 		(ch >= 'A' && ch <= 'Z') ||
 		(ch >= '0' && ch <= '9')
+}
+
+func isNumeric(value string) bool {
+	for _, ch := range value {
+		if ch < '0' || ch > '9' {
+			return false
+		}
+	}
+	return value != ""
+}
+
+func atoi(value string) int {
+	result := 0
+	for _, ch := range value {
+		result = result*10 + int(ch-'0')
+	}
+	return result
 }

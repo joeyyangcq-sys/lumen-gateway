@@ -7,7 +7,6 @@ import (
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/joey/lumen-gateway/internal/plugin"
-	"github.com/joey/lumen-gateway/internal/runtimectx"
 )
 
 func TestRequestTransformerMutatesHostHeadersQueryAndMethod(t *testing.T) {
@@ -145,7 +144,7 @@ func TestRequestTransformerInterpolatesCommonRequestVariables(t *testing.T) {
 	c.Request.URI().SetQueryString("user=alice")
 	c.Request.Header.Set("X-Forwarded-Host", "edge.internal")
 	c.Request.Header.Set("X-Forwarded-For", "203.0.113.10")
-	c.Set(runtimectx.RequestIDKey, "req-1")
+	plugin.SetRequestID(c, "req-1")
 
 	runHandler(c, handler)
 
@@ -166,6 +165,49 @@ func TestRequestTransformerInterpolatesCommonRequestVariables(t *testing.T) {
 	}
 	if got := c.Request.Header.Get("X-Request"); got != "req-1" {
 		t.Fatalf("X-Request = %q, want req-1", got)
+	}
+}
+
+func TestRequestTransformerInterpolatesRuntimeMetadataVariables(t *testing.T) {
+	registry := newRegistry(t)
+	handler, err := registry.Factory("request_transformer")(map[string]any{
+		"set": map[string]any{
+			"headers": map[string]string{
+				"X-Route":    "$route_id",
+				"X-Service":  "$service_id",
+				"X-Upstream": "$upstream_id",
+				"X-Host":     "$upstream_host",
+				"X-Endpoint": "$endpoint_addr",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("factory error = %v", err)
+	}
+
+	c := app.NewContext(0)
+	plugin.SetRouteID(c, "route-a")
+	plugin.SetServiceID(c, "service-a")
+	plugin.SetUpstreamID(c, "upstream-a")
+	plugin.SetUpstreamHost(c, "orders.internal")
+	plugin.SetEndpointAddress(c, "10.0.0.8:9080")
+
+	runHandler(c, handler)
+
+	if got := c.Request.Header.Get("X-Route"); got != "route-a" {
+		t.Fatalf("X-Route = %q, want route-a", got)
+	}
+	if got := c.Request.Header.Get("X-Service"); got != "service-a" {
+		t.Fatalf("X-Service = %q, want service-a", got)
+	}
+	if got := c.Request.Header.Get("X-Upstream"); got != "upstream-a" {
+		t.Fatalf("X-Upstream = %q, want upstream-a", got)
+	}
+	if got := c.Request.Header.Get("X-Host"); got != "orders.internal" {
+		t.Fatalf("X-Host = %q, want orders.internal", got)
+	}
+	if got := c.Request.Header.Get("X-Endpoint"); got != "10.0.0.8:9080" {
+		t.Fatalf("X-Endpoint = %q, want 10.0.0.8:9080", got)
 	}
 }
 
@@ -245,8 +287,8 @@ func TestRequestIDUsesIncomingValueOrGeneratesOne(t *testing.T) {
 	if got := c.Response.Header.Get("X-Req-Id"); got != "incoming-id" {
 		t.Fatalf("response request id = %q, want incoming-id", got)
 	}
-	if got, _ := c.Get(runtimectx.RequestIDKey); got != "incoming-id" {
-		t.Fatalf("context request id = %#v, want incoming-id", got)
+	if got := plugin.FromRequestContext(c).RequestID(); got != "incoming-id" {
+		t.Fatalf("context request id = %q, want incoming-id", got)
 	}
 
 	generated := app.NewContext(0)
@@ -276,7 +318,7 @@ func TestLimitCountAppliesRouteScopedQuotaAndHeaders(t *testing.T) {
 
 	newCtx := func(routeID string) *app.RequestContext {
 		c := app.NewContext(0)
-		c.Set(runtimectx.RouteIDKey, routeID)
+		plugin.SetRouteID(c, routeID)
 		c.Request.Header.Set("X-Forwarded-For", "198.51.100.10")
 		return c
 	}

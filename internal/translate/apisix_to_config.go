@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/joey/lumen-gateway/internal/apisix"
 	"github.com/joey/lumen-gateway/internal/config"
@@ -68,10 +69,12 @@ func ApisixSnapshotToConfig(s apisix.Snapshot, opts ApisixToConfigOptions) (conf
 			upstreamID := route.UpstreamID.String()
 			serviceID := "service-" + upstreamID
 			if _, ok := out.Services[serviceID]; !ok {
+				upstream := out.Upstreams[upstreamID]
 				out.Services[serviceID] = config.ServiceOptions{
 					ID:       serviceID,
 					Protocol: "http",
 					Upstream: upstreamID,
+					Timeout:  upstream.Timeout,
 				}
 			}
 			rt.Service = serviceID
@@ -88,6 +91,7 @@ func ApisixSnapshotToConfig(s apisix.Snapshot, opts ApisixToConfigOptions) (conf
 				ID:       serviceID,
 				Protocol: "http",
 				Upstream: upstreamID,
+				Timeout:  up.Timeout,
 			}
 			rt.Service = serviceID
 		}
@@ -167,6 +171,7 @@ func apisixServiceToConfig(service apisix.Service, pluginConfigs map[string]apis
 		ID:       id,
 		Protocol: "http",
 		Upstream: upstreamID,
+		Timeout:  upstreams[upstreamID].Timeout,
 		Plugins:  plugins,
 	}, nil
 }
@@ -187,8 +192,31 @@ func apisixUpstreamToConfig(up apisix.Upstream) (config.UpstreamOptions, error) 
 		Scheme:       up.Scheme,
 		PassHost:     up.PassHost,
 		UpstreamHost: up.UpstreamHost,
+		Timeout:      apisixTimeoutToConfig(up.Timeout),
 		Endpoints:    endpoints,
 	}, nil
+}
+
+func apisixTimeoutToConfig(timeout *apisix.UpstreamTimeout) config.TimeoutOptions {
+	if timeout == nil {
+		return config.TimeoutOptions{}
+	}
+	return config.TimeoutOptions{
+		Connect: parseAPISIXTimeoutSeconds(timeout.Connect),
+		Read:    parseAPISIXTimeoutSeconds(timeout.Read),
+		Write:   parseAPISIXTimeoutSeconds(timeout.Send),
+	}
+}
+
+func parseAPISIXTimeoutSeconds(value json.Number) time.Duration {
+	if value == "" {
+		return 0
+	}
+	seconds, err := value.Float64()
+	if err != nil || seconds <= 0 {
+		return 0
+	}
+	return time.Duration(seconds * float64(time.Second))
 }
 
 func apisixNodesToEndpoints(raw json.RawMessage) ([]config.EndpointOptions, error) {

@@ -61,6 +61,7 @@ type UpstreamOptions struct {
 	Scheme       string             `yaml:"scheme"`
 	PassHost     string             `yaml:"pass_host"`
 	UpstreamHost string             `yaml:"upstream_host"`
+	Timeout      TimeoutOptions     `yaml:"timeout"`
 	Endpoints    []EndpointOptions  `yaml:"endpoints"`
 	Plugins      []PluginRef        `yaml:"plugins"`
 }

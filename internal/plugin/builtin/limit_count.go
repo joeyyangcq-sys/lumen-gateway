@@ -6,9 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/joey/lumen-gateway/internal/plugin"
-	"github.com/joey/lumen-gateway/internal/runtimectx"
 )
 
 type limitCountConfig struct {
@@ -29,11 +27,11 @@ type limitCountBucket struct {
 }
 
 func registerLimitCount(registry *plugin.Registry) error {
-	return plugin.RegisterTyped(registry, plugin.Metadata{
+	return plugin.RegisterTypedContext(registry, plugin.Metadata{
 		Name:     "limit_count",
 		Priority: 1100,
 		Scopes:   plugin.AllScopes(),
-	}, func(cfg limitCountConfig) (app.HandlerFunc, error) {
+	}, func(cfg limitCountConfig) (plugin.ContextHandler, error) {
 		if cfg.Count <= 0 {
 			return nil, fmt.Errorf("limit_count count must be greater than 0")
 		}
@@ -77,13 +75,13 @@ func registerLimitCount(registry *plugin.Registry) error {
 		counters := make(map[string]*limitCountBucket)
 		var mu sync.Mutex
 
-		return func(ctx context.Context, c *app.RequestContext) {
+		return func(ctx context.Context, pc plugin.PluginContext) {
 			scope := cfg.Group
 			if scope == "" {
-				scope = routeIDFromContext(c)
+				scope = pc.RouteID()
 			}
 
-			derivedKey := deriveLimitCountKey(c, keyType, key)
+			derivedKey := deriveLimitCountKey(pc, keyType, key)
 			counterKey := scope + "|" + derivedKey
 			now := time.Now()
 			window := now.Unix() / int64(cfg.TimeWindow)
@@ -112,51 +110,39 @@ func registerLimitCount(registry *plugin.Registry) error {
 
 			if !allowed {
 				if showHeaders {
-					setLimitCountHeaders(c, cfg.Count, 0, reset)
+					setLimitCountHeaders(pc, cfg.Count, 0, reset)
 				}
-				c.Response.SetStatusCode(rejectedCode)
+				pc.SetResponseStatus(rejectedCode)
 				if cfg.RejectedMsg != "" {
-					c.Response.SetBodyString(cfg.RejectedMsg)
+					pc.SetResponseBody([]byte(cfg.RejectedMsg))
 				}
-				c.Abort()
+				pc.Abort()
 				return
 			}
 
-			c.Next(ctx)
+			pc.Next(ctx)
 			if showHeaders {
-				setLimitCountHeaders(c, cfg.Count, remaining, reset)
+				setLimitCountHeaders(pc, cfg.Count, remaining, reset)
 			}
 		}, nil
 	})
 }
 
-func routeIDFromContext(c *app.RequestContext) string {
-	value, ok := c.Get(runtimectx.RouteIDKey)
-	if !ok {
-		return ""
-	}
-	routeID, ok := value.(string)
-	if !ok {
-		return ""
-	}
-	return routeID
-}
-
-func deriveLimitCountKey(c *app.RequestContext, keyType, key string) string {
+func deriveLimitCountKey(pc plugin.PluginContext, keyType, key string) string {
 	switch keyType {
 	case "constant":
 		return key
 	case "var":
-		return resolveRequestVariable(c, key)
+		return resolveRequestVariable(pc, key)
 	case "var_combination":
-		return renderRequestTemplate(c, key)
+		return renderRequestTemplate(pc, key)
 	default:
 		return ""
 	}
 }
 
-func setLimitCountHeaders(c *app.RequestContext, limit, remaining, reset int) {
-	c.Response.Header.Set("X-RateLimit-Limit", fmt.Sprintf("%d", limit))
-	c.Response.Header.Set("X-RateLimit-Remaining", fmt.Sprintf("%d", remaining))
-	c.Response.Header.Set("X-RateLimit-Reset", fmt.Sprintf("%d", reset))
+func setLimitCountHeaders(pc plugin.PluginContext, limit, remaining, reset int) {
+	pc.SetResponseHeader("X-RateLimit-Limit", fmt.Sprintf("%d", limit))
+	pc.SetResponseHeader("X-RateLimit-Remaining", fmt.Sprintf("%d", remaining))
+	pc.SetResponseHeader("X-RateLimit-Reset", fmt.Sprintf("%d", reset))
 }

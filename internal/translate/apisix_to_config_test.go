@@ -3,6 +3,7 @@ package translate
 import (
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/joey/lumen-gateway/internal/apisix"
 )
@@ -53,6 +54,54 @@ func TestApisixSnapshotToConfigMapsUpstreamProxyFields(t *testing.T) {
 	}
 	if len(upstream.Endpoints) != 1 || upstream.Endpoints[0].Address != "127.0.0.1:9081" {
 		t.Fatalf("endpoints = %#v, want one endpoint 127.0.0.1:9081", upstream.Endpoints)
+	}
+}
+
+func TestApisixSnapshotToConfigMapsUpstreamTimeoutToService(t *testing.T) {
+	nodes, err := json.Marshal(map[string]uint32{"127.0.0.1:9081": 1})
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+
+	options, err := ApisixSnapshotToConfig(apisix.Snapshot{
+		Routes: map[string]apisix.Route{
+			"route-1": {
+				ID:        "route-1",
+				URI:       "/users",
+				ServiceID: "service-1",
+			},
+		},
+		Services: map[string]apisix.Service{
+			"service-1": {
+				ID:         "service-1",
+				UpstreamID: "upstream-1",
+			},
+		},
+		Upstreams: map[string]apisix.Upstream{
+			"upstream-1": {
+				ID:    "upstream-1",
+				Nodes: nodes,
+				Timeout: &apisix.UpstreamTimeout{
+					Connect: "0.1",
+					Send:    "0.2",
+					Read:    "0.3",
+				},
+			},
+		},
+	}, ApisixToConfigOptions{Listen: ":8080"})
+	if err != nil {
+		t.Fatalf("ApisixSnapshotToConfig() error = %v", err)
+	}
+
+	service := options.Services["service-1"]
+	if service.Timeout.Connect != 100*time.Millisecond {
+		t.Fatalf("connect timeout = %s, want 100ms", service.Timeout.Connect)
+	}
+	if service.Timeout.Write != 200*time.Millisecond {
+		t.Fatalf("write timeout = %s, want 200ms", service.Timeout.Write)
+	}
+	if service.Timeout.Read != 300*time.Millisecond {
+		t.Fatalf("read timeout = %s, want 300ms", service.Timeout.Read)
 	}
 }
 

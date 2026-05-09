@@ -8,17 +8,18 @@ import (
 	"net"
 	"slices"
 	"sync/atomic"
+	"time"
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/app/server"
 	"github.com/joey/lumen-gateway/internal/balancer"
 	"github.com/joey/lumen-gateway/internal/balancer/roundrobin"
 	"github.com/joey/lumen-gateway/internal/config"
+	"github.com/joey/lumen-gateway/internal/observability"
 	"github.com/joey/lumen-gateway/internal/plugin"
 	"github.com/joey/lumen-gateway/internal/plugin/builtin"
 	"github.com/joey/lumen-gateway/internal/proxy"
 	"github.com/joey/lumen-gateway/internal/router"
-	"github.com/joey/lumen-gateway/internal/runtimectx"
 )
 
 type Gateway struct {
@@ -120,6 +121,13 @@ func (g *Gateway) Reload(options config.Options) error {
 }
 
 func (g *Gateway) ServeHTTP(ctx context.Context, c *app.RequestContext) {
+	if string(c.Path()) == "/metrics" {
+		c.Response.Header.Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+		c.Response.SetStatusCode(200)
+		c.Response.SetBodyString(observability.Default().RenderPrometheus())
+		return
+	}
+
 	snapshot := g.snapshot.Load()
 	if snapshot == nil || snapshot.Router == nil {
 		c.SetStatusCode(503)
@@ -131,7 +139,9 @@ func (g *Gateway) ServeHTTP(ctx context.Context, c *app.RequestContext) {
 		c.SetStatusCode(404)
 		return
 	}
-	c.Set(runtimectx.RouteIDKey, route.ID)
+	plugin.SetRouteID(c, route.ID)
+	plugin.SetServiceID(c, route.Service)
+	plugin.SetPhase(c, "request")
 
 	handlers := make([]app.HandlerFunc, 0)
 	handlers = append(handlers, snapshot.GlobalHandlers...)
@@ -143,6 +153,7 @@ func (g *Gateway) ServeHTTP(ctx context.Context, c *app.RequestContext) {
 			next.SetStatusCode(503)
 			return
 		}
+		plugin.SetUpstreamID(next, service.Upstream.ID)
 		serviceHandlers := make([]app.HandlerFunc, 0, len(service.Handlers)+len(service.Upstream.Handlers)+1)
 		serviceHandlers = append(serviceHandlers, service.Handlers...)
 		serviceHandlers = append(serviceHandlers, service.Upstream.Handlers...)
@@ -154,7 +165,11 @@ func (g *Gateway) ServeHTTP(ctx context.Context, c *app.RequestContext) {
 			}
 
 			target := resolveTarget(service, service.Upstream, endpoint, terminal)
+			plugin.SetEndpointAddress(terminal, endpoint.Address())
+			plugin.SetUpstreamHost(terminal, target.Host)
+			plugin.SetPhase(terminal, "proxy")
 			if err := service.Proxy.ServeHTTP(nextCtx, terminal, target); err != nil {
+				plugin.SetGatewayError(terminal, err)
 				switch {
 				case errors.Is(err, proxy.ErrTimeout):
 					terminal.SetStatusCode(504)
@@ -164,6 +179,7 @@ func (g *Gateway) ServeHTTP(ctx context.Context, c *app.RequestContext) {
 					terminal.SetStatusCode(502)
 				}
 			}
+			plugin.SetPhase(terminal, "response")
 		})
 		next.SetIndex(-1)
 		next.SetHandlers(serviceHandlers)
@@ -243,7 +259,9 @@ func BuildSnapshot(options config.Options) (*RuntimeSnapshot, error) {
 			Options:  serviceOptions,
 			Handlers: handlers,
 			Upstream: upstreams[serviceOptions.Upstream],
-			Proxy:    proxy.NewHTTP(proxy.HTTPOptions{Timeout: serviceOptions.Timeout}),
+			Proxy: proxy.NewHTTP(proxy.HTTPOptions{
+				Timeout: mergedTimeout(serviceOptions, upstreams[serviceOptions.Upstream]),
+			}),
 		}
 	}
 
@@ -269,6 +287,23 @@ func BuildSnapshot(options config.Options) (*RuntimeSnapshot, error) {
 		Services:       services,
 		Upstreams:      upstreams,
 	}, nil
+}
+
+func mergedTimeout(service config.ServiceOptions, upstream *Upstream) config.TimeoutOptions {
+	timeout := service.Timeout
+	if upstream == nil {
+		return timeout
+	}
+	if timeout.Connect == 0 {
+		timeout.Connect = upstream.Options.Timeout.Connect
+	}
+	if timeout.Read == 0 {
+		timeout.Read = upstream.Options.Timeout.Read
+	}
+	if timeout.Write == 0 {
+		timeout.Write = upstream.Options.Timeout.Write
+	}
+	return timeout
 }
 
 func buildBalancer(options config.UpstreamOptions, endpoints []balancer.Endpoint) (balancer.Balancer, error) {
@@ -345,6 +380,7 @@ func buildPluginHandlers(
 		if err != nil {
 			return nil, fmt.Errorf("plugin %q build failed: %w", name, err)
 		}
+		handler = wrapObservedPluginHandler(name, scope, handler)
 		built = append(built, builtPlugin{
 			index:    index,
 			priority: definition.Metadata().Priority,
@@ -374,4 +410,30 @@ func buildPluginHandlers(
 		handlers = append(handlers, plugin.handler)
 	}
 	return handlers, nil
+}
+
+func wrapObservedPluginHandler(name string, scope plugin.Scope, next app.HandlerFunc) app.HandlerFunc {
+	return func(ctx context.Context, c *app.RequestContext) {
+		pc := plugin.FromRequestContext(c)
+		startPhase := pc.Phase()
+		start := time.Now()
+		next(ctx, c)
+
+		result := "ok"
+		if pc.GatewayError() != nil {
+			result = "error"
+		} else if plugin.IsAborted(c) {
+			result = "aborted"
+		}
+
+		observability.Default().ObservePlugin(observability.PluginLabels{
+			Plugin:     name,
+			Scope:      string(scope),
+			Phase:      startPhase,
+			RouteID:    pc.RouteID(),
+			ServiceID:  pc.ServiceID(),
+			UpstreamID: pc.UpstreamID(),
+			Result:     result,
+		}, time.Since(start))
+	}
 }

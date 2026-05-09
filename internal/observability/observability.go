@@ -1,8 +1,364 @@
 package observability
 
-type Labels struct {
+import (
+	"fmt"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+)
+
+type PluginLabels struct {
+	Plugin     string
+	Scope      string
+	Phase      string
 	RouteID    string
 	ServiceID  string
 	UpstreamID string
-	Endpoint   string
+	Result     string
+}
+
+type UpstreamLabels struct {
+	RouteID     string
+	ServiceID   string
+	UpstreamID  string
+	Endpoint    string
+	Scheme      string
+	Method      string
+	StatusClass string
+	ErrorType   string
+	ReusedConn  bool
+}
+
+type ProxyInfo struct {
+	Scheme             string
+	Address            string
+	Host               string
+	ConnectTime        time.Duration
+	TLSHandshakeTime   time.Duration
+	RequestWriteTime   time.Duration
+	FirstByteTime      time.Duration
+	ResponseReadTime   time.Duration
+	TotalTime          time.Duration
+	ProcessingEstimate time.Duration
+	ReusedConnection   bool
+}
+
+type histogramSnapshot struct {
+	Count   uint64
+	Sum     float64
+	Buckets map[float64]uint64
+}
+
+type Snapshot struct {
+	PluginExecutions  map[string]uint64
+	PluginDurations   map[string]histogramSnapshot
+	UpstreamRequests  map[string]uint64
+	UpstreamDurations map[string]histogramSnapshot
+}
+
+type Recorder interface {
+	ObservePlugin(PluginLabels, time.Duration)
+	ObserveUpstream(UpstreamLabels, ProxyInfo)
+	RenderPrometheus() string
+	Snapshot() Snapshot
+	Reset()
+}
+
+type MemoryRecorder struct {
+	mu sync.Mutex
+
+	pluginExecutions map[string]uint64
+	pluginDurations  map[string]*histogram
+
+	upstreamRequests  map[string]uint64
+	upstreamDurations map[string]*histogram
+}
+
+type histogram struct {
+	bounds []float64
+	count  uint64
+	sum    float64
+	bins   map[float64]uint64
+}
+
+var (
+	defaultRecorder Recorder = NewMemoryRecorder()
+	defaultMu       sync.RWMutex
+)
+
+func NewMemoryRecorder() *MemoryRecorder {
+	return &MemoryRecorder{
+		pluginExecutions:  make(map[string]uint64),
+		pluginDurations:   make(map[string]*histogram),
+		upstreamRequests:  make(map[string]uint64),
+		upstreamDurations: make(map[string]*histogram),
+	}
+}
+
+func Default() Recorder {
+	defaultMu.RLock()
+	defer defaultMu.RUnlock()
+	return defaultRecorder
+}
+
+func SetDefault(recorder Recorder) {
+	defaultMu.Lock()
+	defer defaultMu.Unlock()
+	if recorder == nil {
+		recorder = NewMemoryRecorder()
+	}
+	defaultRecorder = recorder
+}
+
+func (r *MemoryRecorder) ObservePlugin(labels PluginLabels, duration time.Duration) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	executionKey := renderLabelKey(map[string]string{
+		"plugin":      labels.Plugin,
+		"scope":       labels.Scope,
+		"phase":       labels.Phase,
+		"route_id":    labels.RouteID,
+		"service_id":  labels.ServiceID,
+		"upstream_id": labels.UpstreamID,
+		"result":      labels.Result,
+	})
+	r.pluginExecutions[executionKey]++
+	r.observeHistogram(r.pluginDurations, executionKey, duration.Seconds(), pluginDurationBuckets())
+}
+
+func (r *MemoryRecorder) ObserveUpstream(labels UpstreamLabels, info ProxyInfo) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	baseKey := renderLabelKey(map[string]string{
+		"route_id":     labels.RouteID,
+		"service_id":   labels.ServiceID,
+		"upstream_id":  labels.UpstreamID,
+		"endpoint":     labels.Endpoint,
+		"scheme":       labels.Scheme,
+		"method":       labels.Method,
+		"status_class": labels.StatusClass,
+		"error_type":   labels.ErrorType,
+		"reused_conn":  fmt.Sprintf("%t", labels.ReusedConn),
+	})
+	r.upstreamRequests[baseKey]++
+
+	r.observeUpstreamPhase(baseKey, "connect", info.ConnectTime)
+	r.observeUpstreamPhase(baseKey, "tls_handshake", info.TLSHandshakeTime)
+	r.observeUpstreamPhase(baseKey, "request_write", info.RequestWriteTime)
+	r.observeUpstreamPhase(baseKey, "first_byte", info.FirstByteTime)
+	r.observeUpstreamPhase(baseKey, "response_read", info.ResponseReadTime)
+	r.observeUpstreamPhase(baseKey, "processing_estimate", info.ProcessingEstimate)
+	r.observeUpstreamPhase(baseKey, "total", info.TotalTime)
+}
+
+func (r *MemoryRecorder) RenderPrometheus() string {
+	snapshot := r.Snapshot()
+	var builder strings.Builder
+
+	builder.WriteString("# HELP lumen_plugin_executions_total Total plugin executions.\n")
+	builder.WriteString("# TYPE lumen_plugin_executions_total counter\n")
+	for _, key := range sortedKeys(snapshot.PluginExecutions) {
+		builder.WriteString(fmt.Sprintf("lumen_plugin_executions_total%s %d\n", key, snapshot.PluginExecutions[key]))
+	}
+
+	builder.WriteString("# HELP lumen_plugin_duration_seconds Plugin execution duration.\n")
+	builder.WriteString("# TYPE lumen_plugin_duration_seconds histogram\n")
+	renderHistogramMetric(&builder, "lumen_plugin_duration_seconds", snapshot.PluginDurations)
+
+	builder.WriteString("# HELP lumen_upstream_requests_total Total upstream requests.\n")
+	builder.WriteString("# TYPE lumen_upstream_requests_total counter\n")
+	for _, key := range sortedKeys(snapshot.UpstreamRequests) {
+		builder.WriteString(fmt.Sprintf("lumen_upstream_requests_total%s %d\n", key, snapshot.UpstreamRequests[key]))
+	}
+
+	builder.WriteString("# HELP lumen_upstream_phase_duration_seconds Upstream phase durations.\n")
+	builder.WriteString("# TYPE lumen_upstream_phase_duration_seconds histogram\n")
+	renderHistogramMetric(&builder, "lumen_upstream_phase_duration_seconds", snapshot.UpstreamDurations)
+
+	return builder.String()
+}
+
+func (r *MemoryRecorder) Snapshot() Snapshot {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	return Snapshot{
+		PluginExecutions:  cloneCounterMap(r.pluginExecutions),
+		PluginDurations:   cloneHistogramMap(r.pluginDurations),
+		UpstreamRequests:  cloneCounterMap(r.upstreamRequests),
+		UpstreamDurations: cloneHistogramMap(r.upstreamDurations),
+	}
+}
+
+func (r *MemoryRecorder) Reset() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.pluginExecutions = make(map[string]uint64)
+	r.pluginDurations = make(map[string]*histogram)
+	r.upstreamRequests = make(map[string]uint64)
+	r.upstreamDurations = make(map[string]*histogram)
+}
+
+func (r *MemoryRecorder) observeHistogram(target map[string]*histogram, key string, value float64, buckets []float64) {
+	h, ok := target[key]
+	if !ok {
+		h = newHistogram(buckets)
+		target[key] = h
+	}
+	h.observe(value)
+}
+
+func (r *MemoryRecorder) observeUpstreamPhase(baseKey, phase string, duration time.Duration) {
+	key := injectPhaseLabel(baseKey, phase)
+	r.observeHistogram(r.upstreamDurations, key, duration.Seconds(), upstreamDurationBuckets())
+}
+
+func newHistogram(bounds []float64) *histogram {
+	bins := make(map[float64]uint64, len(bounds))
+	for _, bound := range bounds {
+		bins[bound] = 0
+	}
+	return &histogram{
+		bounds: append([]float64(nil), bounds...),
+		bins:   bins,
+	}
+}
+
+func (h *histogram) observe(value float64) {
+	h.count++
+	h.sum += value
+	for _, bound := range h.bounds {
+		if value <= bound {
+			h.bins[bound]++
+		}
+	}
+}
+
+func renderHistogramMetric(builder *strings.Builder, name string, metrics map[string]histogramSnapshot) {
+	for _, key := range sortedHistogramKeys(metrics) {
+		snapshot := metrics[key]
+		bounds := sortedBounds(snapshot.Buckets)
+		for _, bound := range bounds {
+			builder.WriteString(fmt.Sprintf("%s_bucket%s,le=\"%s\"} %d\n", name, trimRightBrace(key), formatBound(bound), snapshot.Buckets[bound]))
+		}
+		builder.WriteString(fmt.Sprintf("%s_bucket%s,le=\"+Inf\"} %d\n", name, trimRightBrace(key), snapshot.Count))
+		builder.WriteString(fmt.Sprintf("%s_sum%s %g\n", name, key, snapshot.Sum))
+		builder.WriteString(fmt.Sprintf("%s_count%s %d\n", name, key, snapshot.Count))
+	}
+}
+
+func trimRightBrace(key string) string {
+	return strings.TrimSuffix(key, "}")
+}
+
+func formatBound(bound float64) string {
+	return strings.TrimRight(strings.TrimRight(fmt.Sprintf("%.6f", bound), "0"), ".")
+}
+
+func pluginDurationBuckets() []float64 {
+	return []float64{0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5}
+}
+
+func upstreamDurationBuckets() []float64 {
+	return []float64{0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10}
+}
+
+func renderLabelKey(labels map[string]string) string {
+	keys := make([]string, 0, len(labels))
+	for key, value := range labels {
+		if value == "" {
+			continue
+		}
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	if len(keys) == 0 {
+		return ""
+	}
+
+	parts := make([]string, 0, len(keys))
+	for _, key := range keys {
+		parts = append(parts, fmt.Sprintf("%s=%q", key, labels[key]))
+	}
+	return "{" + strings.Join(parts, ",") + "}"
+}
+
+func injectPhaseLabel(baseKey, phase string) string {
+	labels := parseLabelKey(baseKey)
+	labels["phase"] = phase
+	return renderLabelKey(labels)
+}
+
+func parseLabelKey(key string) map[string]string {
+	result := make(map[string]string)
+	if key == "" {
+		return result
+	}
+	trimmed := strings.TrimSuffix(strings.TrimPrefix(key, "{"), "}")
+	if trimmed == "" {
+		return result
+	}
+	for _, part := range strings.Split(trimmed, ",") {
+		name, value, ok := strings.Cut(part, "=")
+		if !ok {
+			continue
+		}
+		result[name] = strings.Trim(value, "\"")
+	}
+	return result
+}
+
+func cloneCounterMap(source map[string]uint64) map[string]uint64 {
+	out := make(map[string]uint64, len(source))
+	for key, value := range source {
+		out[key] = value
+	}
+	return out
+}
+
+func cloneHistogramMap(source map[string]*histogram) map[string]histogramSnapshot {
+	out := make(map[string]histogramSnapshot, len(source))
+	for key, value := range source {
+		buckets := make(map[float64]uint64, len(value.bins))
+		for bound, count := range value.bins {
+			buckets[bound] = count
+		}
+		out[key] = histogramSnapshot{
+			Count:   value.count,
+			Sum:     value.sum,
+			Buckets: buckets,
+		}
+	}
+	return out
+}
+
+func sortedKeys(values map[string]uint64) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func sortedHistogramKeys(values map[string]histogramSnapshot) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func sortedBounds(values map[float64]uint64) []float64 {
+	keys := make([]float64, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Float64s(keys)
+	return keys
 }
