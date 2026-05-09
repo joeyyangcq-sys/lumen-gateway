@@ -25,7 +25,12 @@ import (
 type Gateway struct {
 	options  config.Options
 	server   *server.Hertz
+	admin    AdminHandler
 	snapshot atomic.Pointer[RuntimeSnapshot]
+}
+
+type AdminHandler interface {
+	ServeHTTP(ctx context.Context, c *app.RequestContext) bool
 }
 
 type RuntimeSnapshot struct {
@@ -72,7 +77,7 @@ func (e *Endpoint) IsAvailable() bool {
 	return e.Available
 }
 
-func New(options config.Options) (*Gateway, error) {
+func New(options config.Options, adminHandlers ...AdminHandler) (*Gateway, error) {
 	snapshot, err := BuildSnapshot(options)
 	if err != nil {
 		return nil, err
@@ -91,6 +96,9 @@ func New(options config.Options) (*Gateway, error) {
 	gw := &Gateway{
 		options: options,
 		server:  h,
+	}
+	if len(adminHandlers) > 0 {
+		gw.admin = adminHandlers[0]
 	}
 	gw.snapshot.Store(snapshot)
 
@@ -121,6 +129,9 @@ func (g *Gateway) Reload(options config.Options) error {
 }
 
 func (g *Gateway) ServeHTTP(ctx context.Context, c *app.RequestContext) {
+	if g.admin != nil && g.admin.ServeHTTP(ctx, c) {
+		return
+	}
 	if string(c.Path()) == "/metrics" {
 		c.Response.Header.Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 		c.Response.SetStatusCode(200)

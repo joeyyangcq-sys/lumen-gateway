@@ -237,6 +237,32 @@ func TestServeHTTPExposesMetricsEndpoint(t *testing.T) {
 	}
 }
 
+func TestServeHTTPDelegatesAdminHandler(t *testing.T) {
+	gw, err := New(gatewayOptions("127.0.0.1:9001"), adminHandlerFunc(func(_ context.Context, c *app.RequestContext) bool {
+		if string(c.Path()) != "/apisix/admin/routes" {
+			return false
+		}
+		c.Response.SetStatusCode(200)
+		c.Response.SetBodyString(`{"total":0}`)
+		return true
+	}))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	c := app.NewContext(0)
+	c.Request.SetMethod("GET")
+	c.Request.URI().SetPath("/apisix/admin/routes")
+	gw.ServeHTTP(context.Background(), c)
+
+	if got := c.Response.StatusCode(); got != 200 {
+		t.Fatalf("status = %d, want 200", got)
+	}
+	if got := string(c.Response.Body()); got != `{"total":0}` {
+		t.Fatalf("body = %q, want admin response", got)
+	}
+}
+
 func TestBuildPluginHandlersOrdersByPriority(t *testing.T) {
 	registry := plugin.NewRegistry()
 	mustRegisterPlugin(t, registry, plugin.Metadata{
@@ -416,6 +442,12 @@ func installTransport(gw *Gateway, transport http.RoundTripper) {
 			Transport: transport,
 		})
 	}
+}
+
+type adminHandlerFunc func(context.Context, *app.RequestContext) bool
+
+func (f adminHandlerFunc) ServeHTTP(ctx context.Context, c *app.RequestContext) bool {
+	return f(ctx, c)
 }
 
 func mustRegisterPlugin(t *testing.T, registry *plugin.Registry, metadata plugin.Metadata, name string) {

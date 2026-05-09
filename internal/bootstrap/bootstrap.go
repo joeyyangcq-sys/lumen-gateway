@@ -11,6 +11,7 @@ import (
 
 type Options struct {
 	Gateway GatewayOptions `yaml:"gateway"`
+	Admin   AdminOptions   `yaml:"admin"`
 	Etcd    EtcdOptions    `yaml:"etcd"`
 	File    FileOptions    `yaml:"file"`
 }
@@ -18,6 +19,10 @@ type Options struct {
 type GatewayOptions struct {
 	Listen string `yaml:"listen"`
 	Source string `yaml:"source"`
+}
+
+type AdminOptions struct {
+	Key string `yaml:"key"`
 }
 
 type EtcdOptions struct {
@@ -58,6 +63,9 @@ func (o *Options) applyDefaults() {
 	if o.Gateway.Source == "" {
 		o.Gateway.Source = "file"
 	}
+	if o.Admin.Key == "" {
+		o.Admin.Key = "local-dev-admin-key"
+	}
 	if o.Etcd.Prefix == "" {
 		o.Etcd.Prefix = "/apisix"
 	}
@@ -92,4 +100,3 @@ func (o Options) Validate() error {
 
 	return nil
 }
-

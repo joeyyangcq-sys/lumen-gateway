@@ -10,3 +10,7 @@ ETCD_APISIX_EXECUTION_PLAN.md
 
 # local validation scripts / artifacts
 local/
+
+# adjacent local control-plane repos
+lumen-OAuth/
+lumen-mcp-server/

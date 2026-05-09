@@ -9,8 +9,11 @@ import (
 	"os/signal"
 	"runtime/debug"
 	"syscall"
+	"time"
 
+	"github.com/joey/lumen-gateway/internal/adminapi"
 	"github.com/joey/lumen-gateway/internal/bootstrap"
+	"github.com/joey/lumen-gateway/internal/controlplane"
 	"github.com/joey/lumen-gateway/internal/gateway"
 	"github.com/joey/lumen-gateway/internal/provider"
 	"github.com/urfave/cli/v2"
@@ -83,6 +86,9 @@ func Run(opts ...Option) error {
 				Usage:   "Test bootstrap config and then exit",
 			},
 		}, opt.flags...),
+		Commands: []*cli.Command{
+			adminCommand(),
+		},
 		Action: func(ctx *cli.Context) error {
 			configPath := ctx.String("config")
 			boot, err := bootstrap.Load(configPath)
@@ -107,6 +113,14 @@ func Run(opts ...Option) error {
 			}
 			defer source.Close()
 
+			adminHandler, err := adminapi.New(boot)
+			if err != nil {
+				return err
+			}
+			if adminHandler != nil {
+				defer adminHandler.Close()
+			}
+
 			runCtx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 
@@ -115,7 +129,7 @@ func Run(opts ...Option) error {
 				return err
 			}
 
-			gw, err := gateway.New(initial)
+			gw, err := gateway.New(initial, adminHandler)
 			if err != nil {
 				return err
 			}
@@ -127,11 +141,11 @@ func Run(opts ...Option) error {
 			go func() {
 				errCh <- source.Watch(runCtx, func(next provider.Update) {
 					if next.Err != nil {
-						errCh <- next.Err
+						slog.Warn("skip invalid control-plane update", "error", next.Err)
 						return
 					}
 					if err := gw.Reload(next.Options); err != nil {
-						errCh <- err
+						slog.Warn("skip invalid gateway reload", "error", err)
 					}
 				})
 			}()
@@ -157,4 +171,127 @@ func Run(opts ...Option) error {
 	}
 
 	return app.Run(os.Args)
+}
+
+func adminCommand() *cli.Command {
+	return &cli.Command{
+		Name:  "admin",
+		Usage: "Control-plane file and resource operations",
+		Subcommands: []*cli.Command{
+			{
+				Name:  "import",
+				Usage: "Import an APISIX-style bundle file into etcd",
+				Flags: []cli.Flag{
+					&cli.StringFlag{Name: "file", Aliases: []string{"f"}, Required: true, Usage: "Bundle file path"},
+				},
+				Action: func(ctx *cli.Context) error {
+					boot, svc, err := loadControlPlaneService(ctx.String("config"))
+					if err != nil {
+						return err
+					}
+					defer svc.Close()
+					if boot.Gateway.Source != "etcd_apisix" {
+						return errors.New("admin import requires gateway.source=etcd_apisix")
+					}
+					bundle, err := controlplane.LoadBundleFile(ctx.String("file"))
+					if err != nil {
+						return err
+					}
+					result, err := controlplane.ApplyBundle(ctx.Context, svc, bundle)
+					if err != nil {
+						return err
+					}
+					fmt.Printf("imported bundle from %s\n", ctx.String("file"))
+					printApplyResult(result)
+					return nil
+				},
+			},
+			{
+				Name:  "export",
+				Usage: "Export current APISIX resources from etcd to a bundle file",
+				Flags: []cli.Flag{
+					&cli.StringFlag{Name: "out", Aliases: []string{"o"}, Required: true, Usage: "Output bundle file path"},
+				},
+				Action: func(ctx *cli.Context) error {
+					boot, svc, err := loadControlPlaneService(ctx.String("config"))
+					if err != nil {
+						return err
+					}
+					defer svc.Close()
+					if boot.Gateway.Source != "etcd_apisix" {
+						return errors.New("admin export requires gateway.source=etcd_apisix")
+					}
+					bundle, err := controlplane.ExportBundle(ctx.Context, svc)
+					if err != nil {
+						return err
+					}
+					if err := controlplane.WriteBundleFile(ctx.String("out"), bundle); err != nil {
+						return err
+					}
+					fmt.Printf("exported bundle to %s\n", ctx.String("out"))
+					return nil
+				},
+			},
+			{
+				Name:  "sync",
+				Usage: "Apply a bundle file once or keep syncing it into etcd",
+				Flags: []cli.Flag{
+					&cli.StringFlag{Name: "file", Aliases: []string{"f"}, Required: true, Usage: "Bundle file path"},
+					&cli.BoolFlag{Name: "watch", Usage: "Keep polling the file and reapply on change"},
+					&cli.DurationFlag{Name: "interval", Value: time.Second, Usage: "Poll interval when --watch is enabled"},
+				},
+				Action: func(ctx *cli.Context) error {
+					boot, svc, err := loadControlPlaneService(ctx.String("config"))
+					if err != nil {
+						return err
+					}
+					defer svc.Close()
+					if boot.Gateway.Source != "etcd_apisix" {
+						return errors.New("admin sync requires gateway.source=etcd_apisix")
+					}
+					if !ctx.Bool("watch") {
+						bundle, err := controlplane.LoadBundleFile(ctx.String("file"))
+						if err != nil {
+							return err
+						}
+						result, err := controlplane.ApplyBundle(ctx.Context, svc, bundle)
+						if err != nil {
+							return err
+						}
+						fmt.Printf("synced bundle from %s\n", ctx.String("file"))
+						printApplyResult(result)
+						return nil
+					}
+
+					runCtx, cancel := signal.NotifyContext(ctx.Context, syscall.SIGINT, syscall.SIGTERM)
+					defer cancel()
+					fmt.Printf("watching bundle %s\n", ctx.String("file"))
+					return controlplane.SyncBundleFile(runCtx, svc, ctx.String("file"), controlplane.SyncOptions{
+						PollInterval: ctx.Duration("interval"),
+						OnApply:      printApplyResult,
+					})
+				},
+			},
+		},
+	}
+}
+
+func loadControlPlaneService(configPath string) (bootstrap.Options, *controlplane.Service, error) {
+	boot, err := bootstrap.Load(configPath)
+	if err != nil {
+		return bootstrap.Options{}, nil, err
+	}
+	store, err := controlplane.NewEtcdStore(boot)
+	if err != nil {
+		return bootstrap.Options{}, nil, err
+	}
+	return boot, controlplane.New(store), nil
+}
+
+func printApplyResult(result controlplane.ApplyResult) {
+	for _, kind := range controlplane.SupportedKinds() {
+		if count := result.Counts[kind]; count > 0 {
+			fmt.Printf("%s=%d\n", kind, count)
+		}
+	}
 }
