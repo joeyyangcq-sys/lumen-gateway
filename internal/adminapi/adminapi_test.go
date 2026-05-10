@@ -56,6 +56,41 @@ func TestHandlerListGetPutDelete(t *testing.T) {
 		}
 	})
 
+	t.Run("list with page page_size keyword", func(t *testing.T) {
+		c := newRequestContext("GET", "/apisix/admin/routes?page=2&page_size=1&keyword=orders", nil)
+		c.Request.Header.Set("X-API-KEY", "secret")
+		handler.ServeHTTP(context.Background(), c)
+		if got := c.Response.StatusCode(); got != 200 {
+			t.Fatalf("status = %d, want 200", got)
+		}
+		body := string(c.Response.Body())
+		if !strings.Contains(body, `"total":1`) {
+			t.Fatalf("body missing filtered total: %s", body)
+		}
+		if !strings.Contains(body, `"page":2`) || !strings.Contains(body, `"page_size":1`) {
+			t.Fatalf("body missing pagination metadata: %s", body)
+		}
+		if !strings.Contains(body, `"keyword":"orders"`) {
+			t.Fatalf("body missing keyword: %s", body)
+		}
+		if !strings.Contains(body, `"list":[]`) {
+			t.Fatalf("second page should be empty: %s", body)
+		}
+	})
+
+	t.Run("list with keyword first page", func(t *testing.T) {
+		c := newRequestContext("GET", "/apisix/admin/routes?page=1&page_size=1&keyword=orders", nil)
+		c.Request.Header.Set("X-API-KEY", "secret")
+		handler.ServeHTTP(context.Background(), c)
+		if got := c.Response.StatusCode(); got != 200 {
+			t.Fatalf("status = %d, want 200", got)
+		}
+		body := string(c.Response.Body())
+		if !strings.Contains(body, `/orders`) || strings.Contains(body, `/users`) {
+			t.Fatalf("filtered page body = %s", body)
+		}
+	})
+
 	t.Run("get", func(t *testing.T) {
 		c := newRequestContext("GET", "/apisix/admin/routes/1", nil)
 		c.Request.Header.Set("X-API-KEY", "secret")
@@ -381,6 +416,35 @@ func TestHandlerControlPreviewApplyExport(t *testing.T) {
 			t.Fatalf("validate bad request body = %s", body)
 		}
 	})
+}
+
+func TestHandlerControlSchema(t *testing.T) {
+	handler := NewWithService(&fakeService{}, "secret")
+	c := newRequestContext("GET", "/apisix/admin/control/schema", nil)
+	c.Request.Header.Set("X-API-KEY", "secret")
+
+	if handled := handler.ServeHTTP(context.Background(), c); !handled {
+		t.Fatalf("ServeHTTP() handled = false, want true")
+	}
+	if got := c.Response.StatusCode(); got != 200 {
+		t.Fatalf("status = %d, want 200", got)
+	}
+
+	body := string(c.Response.Body())
+	for _, needle := range []string{
+		`"resources"`,
+		`"plugins"`,
+		`"capabilities"`,
+		`"kind":"routes"`,
+		`"name":"proxy-rewrite"`,
+		`"name":"request-id"`,
+		`"bundle_formats":["json","yaml"]`,
+		`"validate":true`,
+	} {
+		if !strings.Contains(body, needle) {
+			t.Fatalf("schema body missing %s: %s", needle, body)
+		}
+	}
 }
 
 type fakeService struct {

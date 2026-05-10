@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -162,9 +163,17 @@ type operationMetadata struct {
 	RollbackOf  string                      `json:"rollback_of,omitempty"`
 }
 
+type listQuery struct {
+	Page     int
+	PageSize int
+	Keyword  string
+}
+
 func (h *Handler) handleControl(ctx context.Context, c *app.RequestContext, pathValue string) {
 	trimmed := strings.Trim(strings.TrimPrefix(pathValue, controlPrefix), "/")
 	switch {
+	case trimmed == "schema" && string(c.Method()) == http.MethodGet:
+		h.handleSchema(c)
 	case trimmed == "validate" && string(c.Method()) == http.MethodPost:
 		h.handleValidate(ctx, c)
 	case trimmed == "imports/preview" && string(c.Method()) == http.MethodPost:
@@ -370,9 +379,15 @@ func (h *Handler) handleList(ctx context.Context, c *app.RequestContext, kind co
 		writeMappedError(c, err)
 		return
 	}
+	query := parseListQuery(c)
+	filtered := filterEnvelopes(items, query.Keyword)
+	paged := paginateEnvelopes(filtered, query.Page, query.PageSize)
 	writeJSON(c, http.StatusOK, map[string]any{
-		"list":  items,
-		"total": len(items),
+		"list":      paged,
+		"total":     len(filtered),
+		"page":      query.Page,
+		"page_size": query.PageSize,
+		"keyword":   query.Keyword,
 	})
 }
 
@@ -556,6 +571,60 @@ func headersOrQueryList(c *app.RequestContext, key string) []string {
 
 func queryValue(c *app.RequestContext, key string) string {
 	return string(c.QueryArgs().Peek(key))
+}
+
+func parseListQuery(c *app.RequestContext) listQuery {
+	page := 1
+	if raw := strings.TrimSpace(queryValue(c, "page")); raw != "" {
+		if value, err := strconv.Atoi(raw); err == nil && value > 0 {
+			page = value
+		}
+	}
+
+	pageSize := 50
+	if raw := strings.TrimSpace(queryValue(c, "page_size")); raw != "" {
+		if value, err := strconv.Atoi(raw); err == nil && value > 0 {
+			pageSize = min(value, 200)
+		}
+	}
+
+	return listQuery{
+		Page:     page,
+		PageSize: pageSize,
+		Keyword:  strings.TrimSpace(queryValue(c, "keyword")),
+	}
+}
+
+func filterEnvelopes(items []controlplane.Envelope, keyword string) []controlplane.Envelope {
+	if strings.TrimSpace(keyword) == "" {
+		return items
+	}
+	keyword = strings.ToLower(keyword)
+	filtered := make([]controlplane.Envelope, 0, len(items))
+	for _, item := range items {
+		candidates := []string{item.Key, string(item.Value)}
+		if id, err := controlplane.ExtractResourceID(item.Value); err == nil && id != "" {
+			candidates = append(candidates, id)
+		}
+		if slices.ContainsFunc(candidates, func(value string) bool {
+			return strings.Contains(strings.ToLower(value), keyword)
+		}) {
+			filtered = append(filtered, item)
+		}
+	}
+	return filtered
+}
+
+func paginateEnvelopes(items []controlplane.Envelope, page int, pageSize int) []controlplane.Envelope {
+	if len(items) == 0 {
+		return []controlplane.Envelope{}
+	}
+	start := (page - 1) * pageSize
+	if start >= len(items) {
+		return []controlplane.Envelope{}
+	}
+	end := min(start+pageSize, len(items))
+	return items[start:end]
 }
 
 func writeAPISIXBody(c *app.RequestContext, status int, payload any) {

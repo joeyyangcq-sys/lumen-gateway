@@ -11,6 +11,7 @@
   - `/apisix/admin/plugin_configs`
   - `/apisix/admin/global_rules`
 - UI-oriented bundle/control APIs:
+  - `/apisix/admin/control/schema`
   - `/apisix/admin/control/validate`
   - `/apisix/admin/control/imports/preview`
   - `/apisix/admin/control/imports/apply`
@@ -62,6 +63,18 @@ Supported resource kinds:
 GET /apisix/admin/routes
 ```
 
+Optional query parameters:
+
+- `page` — 1-based page number, default `1`
+- `page_size` — items per page, default `50`, max `200`
+- `keyword` — case-insensitive substring match against the resource key, id, and stored JSON body
+
+Example:
+
+```http
+GET /apisix/admin/routes?page=1&page_size=20&keyword=users
+```
+
 Response:
 
 ```json
@@ -78,7 +91,10 @@ Response:
       "modifiedIndex": 15
     }
   ],
-  "total": 1
+  "total": 1,
+  "page": 1,
+  "page_size": 20,
+  "keyword": "users"
 }
 ```
 
@@ -202,7 +218,74 @@ Response:
 
 These APIs are intended for Web UI, file import workflows, MCP tools, and future GitOps-style integrations.
 
-### 4.0 Validate resource or bundle
+### 4.0 Fetch control schema / capabilities
+
+```http
+GET /apisix/admin/control/schema
+```
+
+Response:
+
+```json
+{
+  "resources": [
+    {
+      "kind": "routes",
+      "label": "Route",
+      "description": "Matches incoming traffic and attaches a service or upstream plus plugins.",
+      "methods": ["GET", "POST", "PUT", "PATCH", "DELETE"],
+      "key_fields": [
+        {
+          "name": "uri",
+          "type": "string",
+          "required": false,
+          "description": "Single APISIX URI matcher."
+        },
+        {
+          "name": "service_id",
+          "type": "string",
+          "required": false,
+          "description": "References a service resource."
+        }
+      ]
+    }
+  ],
+  "plugins": [
+    {
+      "name": "proxy-rewrite",
+      "label": "Proxy Rewrite",
+      "scopes": ["route", "service", "plugin_config", "global_rule"],
+      "translated_to": ["rewrite_path_regex", "request_transformer", "replace_path"]
+    },
+    {
+      "name": "request-id",
+      "label": "Request ID",
+      "scopes": ["route", "service", "plugin_config", "global_rule"],
+      "translated_to": ["request_id"]
+    }
+  ],
+  "capabilities": {
+    "bundle_formats": ["json", "yaml"],
+    "export_formats": ["json", "yaml"],
+    "history_limit": 10,
+    "supports": {
+      "validate": true,
+      "preview": true,
+      "apply": true,
+      "history": true,
+      "rollback": true
+    },
+    "preview_actions": ["create", "update", "delete", "unchanged"]
+  }
+}
+```
+
+Notes:
+
+- This endpoint is intended as a stable capability source for Web UI.
+- It is intentionally smaller than a full OpenAPI schema; the goal is to reduce UI hard-coding for supported resources and plugins.
+
+### 4.1 Validate resource or bundle
 
 ```http
 POST /apisix/admin/control/validate
