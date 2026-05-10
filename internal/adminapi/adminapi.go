@@ -152,6 +152,16 @@ type validateRequest struct {
 	PruneKinds []string        `json:"prune_kinds"`
 }
 
+type operationMetadata struct {
+	OperationID string                      `json:"operation_id"`
+	CreatedAt   string                      `json:"created_at,omitempty"`
+	Source      string                      `json:"source,omitempty"`
+	Summary     controlplane.HistorySummary `json:"summary,omitempty"`
+	Actor       string                      `json:"actor,omitempty"`
+	Note        string                      `json:"note,omitempty"`
+	RollbackOf  string                      `json:"rollback_of,omitempty"`
+}
+
 func (h *Handler) handleControl(ctx context.Context, c *app.RequestContext, pathValue string) {
 	trimmed := strings.Trim(strings.TrimPrefix(pathValue, controlPrefix), "/")
 	switch {
@@ -263,8 +273,9 @@ func (h *Handler) handleImportApply(ctx context.Context, c *app.RequestContext) 
 		return
 	}
 	writeJSON(c, http.StatusOK, map[string]any{
-		"result":  result,
-		"history": history,
+		"result":    result,
+		"history":   history,
+		"operation": operationFromHistory(history),
 	})
 }
 
@@ -340,8 +351,9 @@ func (h *Handler) handleHistoryRollback(ctx context.Context, c *app.RequestConte
 		return
 	}
 	writeJSON(c, http.StatusOK, map[string]any{
-		"result":  result,
-		"history": history,
+		"result":    result,
+		"history":   history,
+		"operation": operationFromHistory(history),
 	})
 }
 
@@ -576,6 +588,18 @@ func writeControlError(c *app.RequestContext, status int, code string, message s
 		payload["details"] = details
 	}
 	writeJSON(c, status, payload)
+}
+
+func operationFromHistory(entry controlplane.HistoryEntry) operationMetadata {
+	return operationMetadata{
+		OperationID: entry.ID,
+		CreatedAt:   entry.CreatedAt,
+		Source:      entry.Source,
+		Summary:     entry.Summary,
+		Actor:       entry.Actor,
+		Note:        entry.Note,
+		RollbackOf:  entry.RollbackOf,
+	}
 }
 
 func writeMessage(c *app.RequestContext, status int, message string) {

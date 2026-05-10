@@ -218,18 +218,25 @@ func TestHandlerControlPreviewApplyExport(t *testing.T) {
 			ID:        "h1",
 			CreatedAt: "2026-05-10T00:00:00Z",
 			Source:    "control_import_apply",
+			Summary: controlplane.HistorySummary{
+				Counts: map[controlplane.ResourceKind]int{controlplane.KindRoute: 1},
+			},
 		},
 		historyListResult: []controlplane.HistoryEntry{
-			{ID: "h2", CreatedAt: "2026-05-10T01:00:00Z", Source: "rollback:h1"},
-			{ID: "h1", CreatedAt: "2026-05-10T00:00:00Z", Source: "control_import_apply"},
+			{ID: "h2", CreatedAt: "2026-05-10T01:00:00Z", Source: "history_rollback", RollbackOf: "h1", Summary: controlplane.HistorySummary{Counts: map[controlplane.ResourceKind]int{controlplane.KindRoute: 1}}},
+			{ID: "h1", CreatedAt: "2026-05-10T00:00:00Z", Source: "control_import_apply", Summary: controlplane.HistorySummary{Counts: map[controlplane.ResourceKind]int{controlplane.KindRoute: 1}}},
 		},
 		rollbackResult: controlplane.ApplyResult{
 			Counts: map[controlplane.ResourceKind]int{controlplane.KindRoute: 1},
 		},
 		rollbackHistory: controlplane.HistoryEntry{
-			ID:        "h1",
-			CreatedAt: "2026-05-10T00:00:00Z",
-			Source:    "control_import_apply",
+			ID:         "h3",
+			CreatedAt:  "2026-05-10T02:00:00Z",
+			Source:     "history_rollback",
+			RollbackOf: "h1",
+			Summary: controlplane.HistorySummary{
+				Counts: map[controlplane.ResourceKind]int{controlplane.KindRoute: 1},
+			},
 		},
 	}
 	handler := NewWithService(svc, "secret")
@@ -298,6 +305,9 @@ func TestHandlerControlPreviewApplyExport(t *testing.T) {
 		if !strings.Contains(string(c.Response.Body()), `"history":{"id":"h1"`) {
 			t.Fatalf("apply body missing history = %s", c.Response.Body())
 		}
+		if !strings.Contains(string(c.Response.Body()), `"operation":{"operation_id":"h1"`) {
+			t.Fatalf("apply body missing operation = %s", c.Response.Body())
+		}
 	})
 
 	t.Run("export json", func(t *testing.T) {
@@ -352,8 +362,11 @@ func TestHandlerControlPreviewApplyExport(t *testing.T) {
 		if svc.lastRollbackID != "h1" {
 			t.Fatalf("rollback id = %q, want h1", svc.lastRollbackID)
 		}
-		if body := string(c.Response.Body()); !strings.Contains(body, `"history":{"id":"h1"`) {
+		if body := string(c.Response.Body()); !strings.Contains(body, `"history":{"id":"h3"`) {
 			t.Fatalf("history rollback body = %s", body)
+		}
+		if body := string(c.Response.Body()); !strings.Contains(body, `"rollback_of":"h1"`) || !strings.Contains(body, `"operation":{"operation_id":"h3"`) {
+			t.Fatalf("history rollback operation body = %s", body)
 		}
 	})
 

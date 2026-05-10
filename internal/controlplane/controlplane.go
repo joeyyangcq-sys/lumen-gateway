@@ -204,6 +204,10 @@ func (s *Service) ExportBundle(ctx context.Context, options ExportOptions) (File
 }
 
 func (s *Service) SaveHistorySnapshot(ctx context.Context, source string) (HistoryEntry, error) {
+	return s.saveHistorySnapshot(ctx, source, "", "", "")
+}
+
+func (s *Service) saveHistorySnapshot(ctx context.Context, source, actor, note, rollbackOf string) (HistoryEntry, error) {
 	if s.history == nil {
 		return HistoryEntry{}, nil
 	}
@@ -212,10 +216,14 @@ func (s *Service) SaveHistorySnapshot(ctx context.Context, source string) (Histo
 		return HistoryEntry{}, err
 	}
 	entry := HistoryEntry{
-		ID:        generateResourceID(),
-		CreatedAt: time.Now().UTC().Format(time.RFC3339),
-		Source:    source,
-		Bundle:    bundle,
+		ID:         generateResourceID(),
+		CreatedAt:  time.Now().UTC().Format(time.RFC3339),
+		Source:     source,
+		Summary:    summarizeBundle(bundle),
+		Actor:      actor,
+		Note:       note,
+		RollbackOf: rollbackOf,
+		Bundle:     bundle,
 	}
 	return s.history.Save(ctx, entry, s.historyLimit)
 }
@@ -234,18 +242,18 @@ func (s *Service) RollbackHistory(ctx context.Context, id string) (ApplyResult, 
 	if s.history == nil {
 		return ApplyResult{}, HistoryEntry{}, ErrNotFound
 	}
-	entry, err := s.history.Get(ctx, id)
+	target, err := s.history.Get(ctx, id)
 	if err != nil {
 		return ApplyResult{}, HistoryEntry{}, err
 	}
-	result, err := ApplyBundleWithOptions(ctx, s, entry.Bundle, ApplyOptions{
+	result, err := ApplyBundleWithOptions(ctx, s, target.Bundle, ApplyOptions{
 		Prune:      true,
-		PruneKinds: entry.Bundle.Meta.ManagedKinds,
+		PruneKinds: target.Bundle.Meta.ManagedKinds,
 	})
 	if err != nil {
 		return ApplyResult{}, HistoryEntry{}, err
 	}
-	_, saveErr := s.SaveHistorySnapshot(ctx, "rollback:"+id)
+	entry, saveErr := s.saveHistorySnapshot(ctx, "history_rollback", "", "", id)
 	return result, entry, saveErr
 }
 

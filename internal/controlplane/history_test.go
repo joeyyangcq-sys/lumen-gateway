@@ -33,6 +33,9 @@ func TestServiceHistorySnapshotAndRollback(t *testing.T) {
 	if entry.ID == "" || history.lastSaved.Source != "control_import_apply" {
 		t.Fatalf("saved history = %#v", history.lastSaved)
 	}
+	if got := history.lastSaved.Summary.Counts[KindRoute]; got != 1 {
+		t.Fatalf("saved history summary = %#v, want route count 1", history.lastSaved.Summary)
+	}
 	if history.lastSaved.Bundle.Meta.EtcdPrefix != "/apisix" {
 		t.Fatalf("saved bundle meta = %#v", history.lastSaved.Bundle.Meta)
 	}
@@ -41,8 +44,11 @@ func TestServiceHistorySnapshotAndRollback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RollbackHistory() error = %v", err)
 	}
-	if rolledEntry.ID != "h1" {
+	if rolledEntry.ID == "" || rolledEntry.ID == "h1" {
 		t.Fatalf("rolled entry = %#v", rolledEntry)
+	}
+	if rolledEntry.Source != "history_rollback" || rolledEntry.RollbackOf != "h1" {
+		t.Fatalf("rolled entry metadata = %#v", rolledEntry)
 	}
 	if result.Counts[KindRoute] != 1 {
 		t.Fatalf("rollback result = %#v", result)

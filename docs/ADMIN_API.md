@@ -375,7 +375,26 @@ Response:
   "history": {
     "id": "01HX...",
     "created_at": "2026-05-10T03:00:00Z",
-    "source": "control_import_apply"
+    "source": "control_import_apply",
+    "summary": {
+      "counts": {
+        "routes": 1,
+        "services": 1,
+        "upstreams": 1
+      }
+    }
+  },
+  "operation": {
+    "operation_id": "01HX...",
+    "created_at": "2026-05-10T03:00:00Z",
+    "source": "control_import_apply",
+    "summary": {
+      "counts": {
+        "routes": 1,
+        "services": 1,
+        "upstreams": 1
+      }
+    }
   }
 }
 ```
@@ -430,6 +449,14 @@ Response:
       "id": "01HX...",
       "created_at": "2026-05-10T03:00:00Z",
       "source": "control_import_apply",
+      "summary": {
+        "counts": {
+          "routes": 1,
+          "services": 1,
+          "upstreams": 1
+        },
+        "managed_kinds": ["routes", "services", "upstreams"]
+      },
       "bundle": {
         "_meta": {
           "format": "lumen.apisix.bundle/v1"
@@ -461,7 +488,14 @@ Response:
   "history": {
     "id": "01HY...",
     "created_at": "2026-05-10T03:10:00Z",
-    "source": "history_rollback"
+    "source": "history_rollback",
+    "rollback_of": "01HX..."
+  },
+  "operation": {
+    "operation_id": "01HY...",
+    "created_at": "2026-05-10T03:10:00Z",
+    "source": "history_rollback",
+    "rollback_of": "01HX..."
   }
 }
 ```

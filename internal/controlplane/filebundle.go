@@ -27,6 +27,25 @@ type ApplyResult struct {
 	Counts map[ResourceKind]int
 }
 
+func summarizeBundle(bundle FileBundle) HistorySummary {
+	summary := HistorySummary{
+		Counts:       make(map[ResourceKind]int),
+		ManagedKinds: append([]ResourceKind(nil), bundle.Meta.ManagedKinds...),
+	}
+	for _, kind := range SupportedKinds() {
+		if items, ok := bundle.Resources[kind]; ok {
+			summary.Counts[kind] = len(items)
+		}
+	}
+	if len(summary.Counts) == 0 {
+		summary.Counts = nil
+	}
+	if len(summary.ManagedKinds) == 0 {
+		summary.ManagedKinds = nil
+	}
+	return summary
+}
+
 type ExportOptions struct {
 	EtcdPrefix   string
 	IncludeKinds []ResourceKind
