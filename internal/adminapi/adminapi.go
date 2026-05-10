@@ -24,6 +24,8 @@ type service interface {
 	Post(ctx context.Context, kind controlplane.ResourceKind, body json.RawMessage) (controlplane.Envelope, error)
 	Patch(ctx context.Context, kind controlplane.ResourceKind, id string, body json.RawMessage) (controlplane.Envelope, error)
 	Delete(ctx context.Context, kind controlplane.ResourceKind, id string) (controlplane.DeleteResult, error)
+	ValidateBundle(ctx context.Context, bundle controlplane.FileBundle, options controlplane.ValidateOptions) (controlplane.ValidationResult, error)
+	ValidateResource(ctx context.Context, kind controlplane.ResourceKind, id string, body json.RawMessage) (controlplane.ValidationResult, error)
 	PreviewBundle(ctx context.Context, bundle controlplane.FileBundle, options controlplane.PreviewOptions) (controlplane.ApplyPlan, error)
 	ApplyBundle(ctx context.Context, bundle controlplane.FileBundle, options controlplane.ApplyOptions) (controlplane.ApplyResult, error)
 	ExportBundle(ctx context.Context, options controlplane.ExportOptions) (controlplane.FileBundle, error)
@@ -77,7 +79,7 @@ func (h *Handler) ServeHTTP(ctx context.Context, c *app.RequestContext) bool {
 	pathValue := string(c.Path())
 	if strings.HasPrefix(pathValue, controlPrefix) {
 		if !h.authorized(c) {
-			writeError(c, http.StatusUnauthorized, "missing or invalid X-API-KEY")
+			writeControlError(c, http.StatusUnauthorized, "unauthorized", "missing or invalid X-API-KEY", nil)
 			return true
 		}
 		h.handleControl(ctx, c, pathValue)
@@ -140,9 +142,21 @@ type bundleRequest struct {
 	IncludeUnchanged bool            `json:"include_unchanged"`
 }
 
+type validateRequest struct {
+	Kind       string          `json:"kind"`
+	ID         string          `json:"id"`
+	Resource   json.RawMessage `json:"resource"`
+	Bundle     json.RawMessage `json:"bundle"`
+	Content    string          `json:"content"`
+	Prune      bool            `json:"prune"`
+	PruneKinds []string        `json:"prune_kinds"`
+}
+
 func (h *Handler) handleControl(ctx context.Context, c *app.RequestContext, pathValue string) {
 	trimmed := strings.Trim(strings.TrimPrefix(pathValue, controlPrefix), "/")
 	switch {
+	case trimmed == "validate" && string(c.Method()) == http.MethodPost:
+		h.handleValidate(ctx, c)
 	case trimmed == "imports/preview" && string(c.Method()) == http.MethodPost:
 		h.handleImportPreview(ctx, c)
 	case trimmed == "imports/apply" && string(c.Method()) == http.MethodPost:
@@ -154,19 +168,62 @@ func (h *Handler) handleControl(ctx context.Context, c *app.RequestContext, path
 	case strings.HasPrefix(trimmed, "history/") && strings.HasSuffix(trimmed, "/rollback") && string(c.Method()) == http.MethodPost:
 		h.handleHistoryRollback(ctx, c, trimmed)
 	default:
-		writeError(c, http.StatusNotFound, "unsupported control path")
+		writeControlError(c, http.StatusNotFound, "not_found", "unsupported control path", nil)
 	}
+}
+
+func (h *Handler) handleValidate(ctx context.Context, c *app.RequestContext) {
+	request, err := decodeValidateRequest(c.Request.Body())
+	if err != nil {
+		writeControlMappedError(c, err)
+		return
+	}
+
+	if request.Kind != "" || len(request.Resource) > 0 {
+		kind, ok := controlplane.ParseKind(request.Kind)
+		if !ok {
+			writeControlError(c, http.StatusBadRequest, "invalid_request", "unsupported resource kind", nil)
+			return
+		}
+		result, err := h.service.ValidateResource(ctx, kind, request.ID, request.Resource)
+		if err != nil {
+			writeControlMappedError(c, err)
+			return
+		}
+		writeJSON(c, http.StatusOK, result)
+		return
+	}
+
+	pruneKinds, err := parseKinds(request.PruneKinds)
+	if err != nil {
+		writeControlMappedError(c, err)
+		return
+	}
+	bundle, err := decodeBundleFromValidateRequest(request)
+	if err != nil {
+		writeControlMappedError(c, err)
+		return
+	}
+	result, err := h.service.ValidateBundle(ctx, bundle, controlplane.ValidateOptions{
+		Prune:      request.Prune,
+		PruneKinds: pruneKinds,
+	})
+	if err != nil {
+		writeControlMappedError(c, err)
+		return
+	}
+	writeJSON(c, http.StatusOK, result)
 }
 
 func (h *Handler) handleImportPreview(ctx context.Context, c *app.RequestContext) {
 	request, bundle, err := decodeBundleRequest(c.Request.Body())
 	if err != nil {
-		writeMappedError(c, err)
+		writeControlMappedError(c, err)
 		return
 	}
 	pruneKinds, err := parseKinds(request.PruneKinds)
 	if err != nil {
-		writeMappedError(c, err)
+		writeControlMappedError(c, err)
 		return
 	}
 	plan, err := h.service.PreviewBundle(ctx, bundle, controlplane.PreviewOptions{
@@ -175,7 +232,7 @@ func (h *Handler) handleImportPreview(ctx context.Context, c *app.RequestContext
 		IncludeUnchanged: request.IncludeUnchanged,
 	})
 	if err != nil {
-		writeMappedError(c, err)
+		writeControlMappedError(c, err)
 		return
 	}
 	writeJSON(c, http.StatusOK, plan)
@@ -184,12 +241,12 @@ func (h *Handler) handleImportPreview(ctx context.Context, c *app.RequestContext
 func (h *Handler) handleImportApply(ctx context.Context, c *app.RequestContext) {
 	request, bundle, err := decodeBundleRequest(c.Request.Body())
 	if err != nil {
-		writeMappedError(c, err)
+		writeControlMappedError(c, err)
 		return
 	}
 	pruneKinds, err := parseKinds(request.PruneKinds)
 	if err != nil {
-		writeMappedError(c, err)
+		writeControlMappedError(c, err)
 		return
 	}
 	result, err := h.service.ApplyBundle(ctx, bundle, controlplane.ApplyOptions{
@@ -197,12 +254,12 @@ func (h *Handler) handleImportApply(ctx context.Context, c *app.RequestContext) 
 		PruneKinds: pruneKinds,
 	})
 	if err != nil {
-		writeMappedError(c, err)
+		writeControlMappedError(c, err)
 		return
 	}
 	history, err := h.service.SaveHistorySnapshot(ctx, "control_import_apply")
 	if err != nil {
-		writeMappedError(c, err)
+		writeControlMappedError(c, err)
 		return
 	}
 	writeJSON(c, http.StatusOK, map[string]any{
@@ -214,7 +271,7 @@ func (h *Handler) handleImportApply(ctx context.Context, c *app.RequestContext) 
 func (h *Handler) handleExport(ctx context.Context, c *app.RequestContext) {
 	kinds, err := parseKinds(headersOrQueryList(c, "kind"))
 	if err != nil {
-		writeMappedError(c, err)
+		writeControlMappedError(c, err)
 		return
 	}
 	format := strings.ToLower(strings.TrimSpace(queryValue(c, "format")))
@@ -226,21 +283,21 @@ func (h *Handler) handleExport(ctx context.Context, c *app.RequestContext) {
 		IncludeMeta:  true,
 	})
 	if err != nil {
-		writeMappedError(c, err)
+		writeControlMappedError(c, err)
 		return
 	}
 	switch format {
 	case "json":
 		payload, err := bundle.ToMap()
 		if err != nil {
-			writeMappedError(c, err)
+			writeControlMappedError(c, err)
 			return
 		}
 		writeJSON(c, http.StatusOK, payload)
 	case "yaml":
 		content, err := bundle.ToYAML()
 		if err != nil {
-			writeMappedError(c, err)
+			writeControlMappedError(c, err)
 			return
 		}
 		writeJSON(c, http.StatusOK, map[string]any{
@@ -248,7 +305,7 @@ func (h *Handler) handleExport(ctx context.Context, c *app.RequestContext) {
 			"content": string(content),
 		})
 	default:
-		writeError(c, http.StatusBadRequest, "unsupported export format")
+		writeControlError(c, http.StatusBadRequest, "invalid_request", "unsupported export format", nil)
 	}
 }
 
@@ -261,7 +318,7 @@ func (h *Handler) handleHistoryList(ctx context.Context, c *app.RequestContext) 
 	}
 	items, err := h.service.ListHistory(ctx, limit)
 	if err != nil {
-		writeMappedError(c, err)
+		writeControlMappedError(c, err)
 		return
 	}
 	writeJSON(c, http.StatusOK, map[string]any{
@@ -274,12 +331,12 @@ func (h *Handler) handleHistoryRollback(ctx context.Context, c *app.RequestConte
 	id := strings.TrimSuffix(strings.TrimPrefix(trimmed, "history/"), "/rollback")
 	id = strings.Trim(id, "/")
 	if id == "" {
-		writeError(c, http.StatusBadRequest, "history id is required")
+		writeControlError(c, http.StatusBadRequest, "invalid_request", "history id is required", nil)
 		return
 	}
 	result, history, err := h.service.RollbackHistory(ctx, id)
 	if err != nil {
-		writeMappedError(c, err)
+		writeControlMappedError(c, err)
 		return
 	}
 	writeJSON(c, http.StatusOK, map[string]any{
@@ -394,6 +451,19 @@ func writeMappedError(c *app.RequestContext, err error) {
 	}
 }
 
+func writeControlMappedError(c *app.RequestContext, err error) {
+	switch {
+	case errors.Is(err, controlplane.ErrNotFound):
+		writeControlError(c, http.StatusNotFound, "not_found", "Key not found", nil)
+	case errors.Is(err, controlplane.ErrInvalidBody):
+		writeControlError(c, http.StatusBadRequest, "invalid_request", err.Error(), nil)
+	case errors.Is(err, controlplane.ErrUnsupportedKind):
+		writeControlError(c, http.StatusBadRequest, "invalid_request", err.Error(), nil)
+	default:
+		writeControlError(c, http.StatusBadGateway, "controlplane_error", err.Error(), nil)
+	}
+}
+
 func decodeBundleRequest(body []byte) (bundleRequest, controlplane.FileBundle, error) {
 	var request bundleRequest
 	if err := json.Unmarshal(body, &request); err != nil {
@@ -412,6 +482,38 @@ func decodeBundleRequest(body []byte) (bundleRequest, controlplane.FileBundle, e
 		return request, bundle, err
 	default:
 		return bundleRequest{}, controlplane.FileBundle{}, controlplane.ErrInvalidBody
+	}
+}
+
+func decodeValidateRequest(body []byte) (validateRequest, error) {
+	var request validateRequest
+	if err := json.Unmarshal(body, &request); err != nil {
+		return validateRequest{}, controlplane.ErrInvalidBody
+	}
+	if request.Kind == "" && len(request.Resource) == 0 && len(request.Bundle) == 0 && strings.TrimSpace(request.Content) == "" {
+		return validateRequest{}, controlplane.ErrInvalidBody
+	}
+	if request.Kind != "" && len(request.Resource) == 0 {
+		return validateRequest{}, controlplane.ErrInvalidBody
+	}
+	if request.Kind == "" && len(request.Resource) > 0 {
+		return validateRequest{}, controlplane.ErrInvalidBody
+	}
+	return request, nil
+}
+
+func decodeBundleFromValidateRequest(request validateRequest) (controlplane.FileBundle, error) {
+	switch {
+	case len(request.Bundle) > 0:
+		encoded, err := json.Marshal(request.Bundle)
+		if err != nil {
+			return controlplane.FileBundle{}, controlplane.ErrInvalidBody
+		}
+		return controlplane.ParseBundle(encoded)
+	case strings.TrimSpace(request.Content) != "":
+		return controlplane.ParseBundle([]byte(request.Content))
+	default:
+		return controlplane.FileBundle{}, controlplane.ErrInvalidBody
 	}
 }
 
@@ -463,6 +565,17 @@ func writeError(c *app.RequestContext, status int, message string) {
 	writeJSON(c, status, map[string]any{
 		"error_msg": message,
 	})
+}
+
+func writeControlError(c *app.RequestContext, status int, code string, message string, details any) {
+	payload := map[string]any{
+		"code":    code,
+		"message": message,
+	}
+	if details != nil {
+		payload["details"] = details
+	}
+	writeJSON(c, status, payload)
 }
 
 func writeMessage(c *app.RequestContext, status int, message string) {

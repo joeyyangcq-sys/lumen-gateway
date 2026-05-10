@@ -183,6 +183,13 @@ func TestHandlerIgnoresNonAdminPaths(t *testing.T) {
 
 func TestHandlerControlPreviewApplyExport(t *testing.T) {
 	svc := &fakeService{
+		validateBundleResult: controlplane.ValidationResult{
+			Valid:  false,
+			Issues: []controlplane.ValidationIssue{{Resource: "routes", ResourceID: "1", Field: "service_id", Message: "references unknown service \"svc\""}},
+		},
+		validateResourceResult: controlplane.ValidationResult{
+			Valid: true,
+		},
 		previewResult: controlplane.ApplyPlan{
 			Summary: []controlplane.PlanSummary{{Kind: controlplane.KindRoute, Create: 1}},
 			Changes: []controlplane.ChangeItem{{Kind: controlplane.KindRoute, ID: "1", Action: controlplane.ChangeCreate}},
@@ -220,6 +227,36 @@ func TestHandlerControlPreviewApplyExport(t *testing.T) {
 		},
 	}
 	handler := NewWithService(svc, "secret")
+
+	t.Run("validate resource", func(t *testing.T) {
+		c := newRequestContext("POST", "/apisix/admin/control/validate", []byte(`{"kind":"routes","id":"1","resource":{"uri":"/demo","service_id":"svc"}}`))
+		c.Request.Header.Set("X-API-KEY", "secret")
+		handler.ServeHTTP(context.Background(), c)
+		if got := c.Response.StatusCode(); got != 200 {
+			t.Fatalf("status = %d, want 200", got)
+		}
+		if svc.lastValidateKind != controlplane.KindRoute || svc.lastValidateID != "1" {
+			t.Fatalf("validate resource target = (%q,%q), want (routes,1)", svc.lastValidateKind, svc.lastValidateID)
+		}
+		if body := string(c.Response.Body()); !strings.Contains(body, `"valid":true`) {
+			t.Fatalf("validate resource body = %s", body)
+		}
+	})
+
+	t.Run("validate bundle", func(t *testing.T) {
+		c := newRequestContext("POST", "/apisix/admin/control/validate", []byte(`{"bundle":{"routes":{"1":{"uri":"/demo","service_id":"svc"}}},"prune":true,"prune_kinds":["routes"]}`))
+		c.Request.Header.Set("X-API-KEY", "secret")
+		handler.ServeHTTP(context.Background(), c)
+		if got := c.Response.StatusCode(); got != 200 {
+			t.Fatalf("status = %d, want 200", got)
+		}
+		if !svc.lastValidateOptions.Prune || len(svc.lastValidateOptions.PruneKinds) != 1 || svc.lastValidateOptions.PruneKinds[0] != controlplane.KindRoute {
+			t.Fatalf("validate bundle options = %#v", svc.lastValidateOptions)
+		}
+		if body := string(c.Response.Body()); !strings.Contains(body, `"issues"`) {
+			t.Fatalf("validate bundle body = %s", body)
+		}
+	})
 
 	t.Run("preview", func(t *testing.T) {
 		c := newRequestContext("POST", "/apisix/admin/control/imports/preview", []byte(`{"bundle":{"routes":{"1":{"uri":"/demo"}}},"prune":true,"prune_kinds":["routes"],"include_unchanged":true}`))
@@ -310,44 +347,64 @@ func TestHandlerControlPreviewApplyExport(t *testing.T) {
 			t.Fatalf("history rollback body = %s", body)
 		}
 	})
+
+	t.Run("validate bad request uses control error model", func(t *testing.T) {
+		c := newRequestContext("POST", "/apisix/admin/control/validate", []byte(`{"kind":"unknown","resource":{}}`))
+		c.Request.Header.Set("X-API-KEY", "secret")
+		handler.ServeHTTP(context.Background(), c)
+		if got := c.Response.StatusCode(); got != 400 {
+			t.Fatalf("status = %d, want 400", got)
+		}
+		if body := string(c.Response.Body()); !strings.Contains(body, `"code":"invalid_request"`) || !strings.Contains(body, `"message":"unsupported resource kind"`) {
+			t.Fatalf("validate bad request body = %s", body)
+		}
+	})
 }
 
 type fakeService struct {
-	listResult        []controlplane.Envelope
-	listErr           error
-	getResult         controlplane.Envelope
-	getErr            error
-	putResult         controlplane.Envelope
-	putErr            error
-	postResult        controlplane.Envelope
-	postErr           error
-	patchResult       controlplane.Envelope
-	patchErr          error
-	deleteResult      controlplane.DeleteResult
-	deleteErr         error
-	previewResult     controlplane.ApplyPlan
-	previewErr        error
-	applyResult       controlplane.ApplyResult
-	applyErr          error
-	exportResult      controlplane.FileBundle
-	exportErr         error
-	historyResult     controlplane.HistoryEntry
-	historyErr        error
-	historyListResult []controlplane.HistoryEntry
-	historyListErr    error
-	rollbackResult    controlplane.ApplyResult
-	rollbackHistory   controlplane.HistoryEntry
-	rollbackErr       error
+	listResult             []controlplane.Envelope
+	listErr                error
+	getResult              controlplane.Envelope
+	getErr                 error
+	putResult              controlplane.Envelope
+	putErr                 error
+	postResult             controlplane.Envelope
+	postErr                error
+	patchResult            controlplane.Envelope
+	patchErr               error
+	deleteResult           controlplane.DeleteResult
+	deleteErr              error
+	validateBundleResult   controlplane.ValidationResult
+	validateBundleErr      error
+	validateResourceResult controlplane.ValidationResult
+	validateResourceErr    error
+	previewResult          controlplane.ApplyPlan
+	previewErr             error
+	applyResult            controlplane.ApplyResult
+	applyErr               error
+	exportResult           controlplane.FileBundle
+	exportErr              error
+	historyResult          controlplane.HistoryEntry
+	historyErr             error
+	historyListResult      []controlplane.HistoryEntry
+	historyListErr         error
+	rollbackResult         controlplane.ApplyResult
+	rollbackHistory        controlplane.HistoryEntry
+	rollbackErr            error
 
-	lastKind           controlplane.ResourceKind
-	lastID             string
-	lastBody           json.RawMessage
-	lastPreviewOptions controlplane.PreviewOptions
-	lastApplyOptions   controlplane.ApplyOptions
-	lastExportOptions  controlplane.ExportOptions
-	lastHistorySource  string
-	lastHistoryLimit   int
-	lastRollbackID     string
+	lastKind            controlplane.ResourceKind
+	lastID              string
+	lastBody            json.RawMessage
+	lastValidateKind    controlplane.ResourceKind
+	lastValidateID      string
+	lastValidateBody    json.RawMessage
+	lastValidateOptions controlplane.ValidateOptions
+	lastPreviewOptions  controlplane.PreviewOptions
+	lastApplyOptions    controlplane.ApplyOptions
+	lastExportOptions   controlplane.ExportOptions
+	lastHistorySource   string
+	lastHistoryLimit    int
+	lastRollbackID      string
 }
 
 func (s *fakeService) List(_ context.Context, kind controlplane.ResourceKind) ([]controlplane.Envelope, error) {
@@ -386,6 +443,18 @@ func (s *fakeService) Delete(_ context.Context, kind controlplane.ResourceKind, 
 	s.lastKind = kind
 	s.lastID = id
 	return s.deleteResult, s.deleteErr
+}
+
+func (s *fakeService) ValidateBundle(_ context.Context, bundle controlplane.FileBundle, options controlplane.ValidateOptions) (controlplane.ValidationResult, error) {
+	s.lastValidateOptions = options
+	return s.validateBundleResult, s.validateBundleErr
+}
+
+func (s *fakeService) ValidateResource(_ context.Context, kind controlplane.ResourceKind, id string, body json.RawMessage) (controlplane.ValidationResult, error) {
+	s.lastValidateKind = kind
+	s.lastValidateID = id
+	s.lastValidateBody = body
+	return s.validateResourceResult, s.validateResourceErr
 }
 
 func (s *fakeService) PreviewBundle(_ context.Context, bundle controlplane.FileBundle, options controlplane.PreviewOptions) (controlplane.ApplyPlan, error) {

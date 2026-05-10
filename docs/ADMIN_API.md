@@ -11,6 +11,7 @@
   - `/apisix/admin/plugin_configs`
   - `/apisix/admin/global_rules`
 - UI-oriented bundle/control APIs:
+  - `/apisix/admin/control/validate`
   - `/apisix/admin/control/imports/preview`
   - `/apisix/admin/control/imports/apply`
   - `/apisix/admin/control/exports`
@@ -200,6 +201,66 @@ Response:
 ## 4. Bundle preview/apply/export APIs
 
 These APIs are intended for Web UI, file import workflows, MCP tools, and future GitOps-style integrations.
+
+### 4.0 Validate resource or bundle
+
+```http
+POST /apisix/admin/control/validate
+Content-Type: application/json
+```
+
+Single-resource request:
+
+```json
+{
+  "kind": "routes",
+  "id": "route-1",
+  "resource": {
+    "uri": "/demo",
+    "service_id": "svc-1"
+  }
+}
+```
+
+Bundle request:
+
+```json
+{
+  "bundle": {
+    "routes": {
+      "route-1": {
+        "id": "route-1",
+        "uri": "/demo",
+        "service_id": "svc-1"
+      }
+    }
+  },
+  "prune": true,
+  "prune_kinds": ["routes"]
+}
+```
+
+Response:
+
+```json
+{
+  "valid": false,
+  "issues": [
+    {
+      "resource": "routes",
+      "resource_id": "route-1",
+      "field": "service_id",
+      "message": "references unknown service \"svc-1\""
+    }
+  ]
+}
+```
+
+Notes:
+
+- syntactically valid requests always return `200`
+- semantic problems are reported in `issues`
+- malformed requests use the unified control error model
 
 ### 4.1 Bundle request body
 
@@ -430,6 +491,24 @@ Body:
   "error_msg": "resource id is required"
 }
 ```
+
+### Control API errors
+
+The newer `/apisix/admin/control/*` endpoints use a UI-friendly error model:
+
+```json
+{
+  "code": "invalid_request",
+  "message": "unsupported resource kind"
+}
+```
+
+Common codes:
+
+- `unauthorized`
+- `invalid_request`
+- `not_found`
+- `controlplane_error`
 
 ### Unsupported path
 
