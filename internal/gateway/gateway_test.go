@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -36,6 +37,41 @@ func TestBuildSnapshotBuildsPluginChainsForAllScopes(t *testing.T) {
 	}
 	if len(snapshot.Upstreams["user-upstream"].Handlers) != 1 {
 		t.Fatalf("upstream handlers = %d, want 1", len(snapshot.Upstreams["user-upstream"].Handlers))
+	}
+}
+
+func TestNewWithCompilerUsesInjectedCompilerForBuildAndReload(t *testing.T) {
+	compiled := 0
+	compiler := runtimeCompilerFunc(func(options config.Options) (*RuntimeSnapshot, error) {
+		compiled++
+		return BuildSnapshot(options)
+	})
+
+	gw, err := NewWithCompiler(gatewayOptions("127.0.0.1:9001"), compiler)
+	if err != nil {
+		t.Fatalf("NewWithCompiler() error = %v", err)
+	}
+	if compiled != 1 {
+		t.Fatalf("compiler compile count = %d, want 1 after NewWithCompiler", compiled)
+	}
+
+	if err := gw.Reload(gatewayOptions("127.0.0.1:9002")); err != nil {
+		t.Fatalf("Reload() error = %v", err)
+	}
+	if compiled != 2 {
+		t.Fatalf("compiler compile count = %d, want 2 after Reload", compiled)
+	}
+}
+
+func TestNewWithCompilerReturnsCompileError(t *testing.T) {
+	wantErr := errors.New("compile failed")
+	compiler := runtimeCompilerFunc(func(config.Options) (*RuntimeSnapshot, error) {
+		return nil, wantErr
+	})
+
+	_, err := NewWithCompiler(gatewayOptions("127.0.0.1:9001"), compiler)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("NewWithCompiler() error = %v, want %v", err, wantErr)
 	}
 }
 
@@ -454,6 +490,12 @@ type adminHandlerFunc func(context.Context, *app.RequestContext) bool
 
 func (f adminHandlerFunc) ServeHTTP(ctx context.Context, c *app.RequestContext) bool {
 	return f(ctx, c)
+}
+
+type runtimeCompilerFunc func(config.Options) (*RuntimeSnapshot, error)
+
+func (f runtimeCompilerFunc) Compile(options config.Options) (*RuntimeSnapshot, error) {
+	return f(options)
 }
 
 func mustRegisterPlugin(t *testing.T, registry *plugin.Registry, metadata plugin.Metadata, name string) {

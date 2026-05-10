@@ -13,11 +13,9 @@ import (
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/app/server"
 	"github.com/joey/lumen-gateway/internal/balancer"
-	"github.com/joey/lumen-gateway/internal/balancer/roundrobin"
 	"github.com/joey/lumen-gateway/internal/config"
 	"github.com/joey/lumen-gateway/internal/observability"
 	"github.com/joey/lumen-gateway/internal/plugin"
-	"github.com/joey/lumen-gateway/internal/plugin/builtin"
 	"github.com/joey/lumen-gateway/internal/proxy"
 	"github.com/joey/lumen-gateway/internal/router"
 )
@@ -26,6 +24,7 @@ type Gateway struct {
 	options  config.Options
 	server   *server.Hertz
 	admin    AdminHandler
+	compiler RuntimeCompiler
 	snapshot atomic.Pointer[RuntimeSnapshot]
 }
 
@@ -78,7 +77,15 @@ func (e *Endpoint) IsAvailable() bool {
 }
 
 func New(options config.Options, adminHandlers ...AdminHandler) (*Gateway, error) {
-	snapshot, err := BuildSnapshot(options)
+	return NewWithCompiler(options, NewRuntimeCompiler(), adminHandlers...)
+}
+
+func NewWithCompiler(options config.Options, compiler RuntimeCompiler, adminHandlers ...AdminHandler) (*Gateway, error) {
+	if compiler == nil {
+		compiler = NewRuntimeCompiler()
+	}
+
+	snapshot, err := compiler.Compile(options)
 	if err != nil {
 		return nil, err
 	}
@@ -96,6 +103,7 @@ func New(options config.Options, adminHandlers ...AdminHandler) (*Gateway, error
 	gw := &Gateway{
 		options: options,
 		server:  h,
+		compiler: compiler,
 	}
 	if len(adminHandlers) > 0 {
 		gw.admin = adminHandlers[0]
@@ -120,7 +128,11 @@ func (g *Gateway) Shutdown() error {
 }
 
 func (g *Gateway) Reload(options config.Options) error {
-	snapshot, err := BuildSnapshot(options)
+	compiler := g.compiler
+	if compiler == nil {
+		compiler = NewRuntimeCompiler()
+	}
+	snapshot, err := compiler.Compile(options)
 	if err != nil {
 		return err
 	}
@@ -207,100 +219,7 @@ func (g *Gateway) ServeHTTP(ctx context.Context, c *app.RequestContext) {
 }
 
 func BuildSnapshot(options config.Options) (*RuntimeSnapshot, error) {
-	registry := plugin.NewRegistry()
-	if err := builtin.Register(registry); err != nil {
-		return nil, err
-	}
-
-	globalHandlers, err := buildPluginHandlers(registry, options, plugin.ScopeGlobal, options.GlobalPlugins)
-	if err != nil {
-		return nil, err
-	}
-
-	serverHandlers := make([]app.HandlerFunc, 0)
-	for _, serverOptions := range options.Servers {
-		handlers, err := buildPluginHandlers(registry, options, plugin.ScopeServer, serverOptions.Plugins)
-		if err != nil {
-			return nil, fmt.Errorf("server %q plugins: %w", serverOptions.ID, err)
-		}
-		serverHandlers = handlers
-		break
-	}
-
-	upstreams := make(map[string]*Upstream, len(options.Upstreams))
-	for id, upstreamOptions := range options.Upstreams {
-		handlers, err := buildPluginHandlers(registry, options, plugin.ScopeUpstream, upstreamOptions.Plugins)
-		if err != nil {
-			return nil, fmt.Errorf("upstream %q plugins: %w", id, err)
-		}
-		endpoints := make([]*Endpoint, 0, len(upstreamOptions.Endpoints))
-		balancerEndpoints := make([]balancer.Endpoint, 0, len(upstreamOptions.Endpoints))
-		for _, endpointOptions := range upstreamOptions.Endpoints {
-			weight := endpointOptions.Weight
-			if weight == 0 {
-				weight = 1
-			}
-			endpoint := &Endpoint{
-				Addr:      endpointOptions.Address,
-				Load:      weight,
-				Tags:      endpointOptions.Tags,
-				Available: true,
-			}
-			endpoints = append(endpoints, endpoint)
-			balancerEndpoints = append(balancerEndpoints, endpoint)
-		}
-		upstreamBalancer, err := buildBalancer(upstreamOptions, balancerEndpoints)
-		if err != nil {
-			return nil, fmt.Errorf("upstream %q balancer: %w", id, err)
-		}
-		upstreams[id] = &Upstream{
-			ID:        id,
-			Options:   upstreamOptions,
-			Handlers:  handlers,
-			Endpoints: endpoints,
-			Balancer:  upstreamBalancer,
-		}
-	}
-
-	services := make(map[string]*Service, len(options.Services))
-	for id, serviceOptions := range options.Services {
-		handlers, err := buildPluginHandlers(registry, options, plugin.ScopeService, serviceOptions.Plugins)
-		if err != nil {
-			return nil, fmt.Errorf("service %q plugins: %w", id, err)
-		}
-		services[id] = &Service{
-			ID:       id,
-			Options:  serviceOptions,
-			Handlers: handlers,
-			Upstream: upstreams[serviceOptions.Upstream],
-			Proxy: proxy.NewHTTP(proxy.HTTPOptions{
-				Timeout: mergedTimeout(serviceOptions, upstreams[serviceOptions.Upstream]),
-			}),
-		}
-	}
-
-	r := router.New()
-	routeHandlers := make(map[string][]app.HandlerFunc, len(options.Routes))
-	for id, routeOptions := range options.Routes {
-		routeOptions.ID = id
-		if err := r.Add(routeOptions); err != nil {
-			return nil, err
-		}
-		handlers, err := buildPluginHandlers(registry, options, plugin.ScopeRoute, routeOptions.Plugins)
-		if err != nil {
-			return nil, fmt.Errorf("route %q plugins: %w", id, err)
-		}
-		routeHandlers[id] = handlers
-	}
-
-	return &RuntimeSnapshot{
-		Router:         r,
-		GlobalHandlers: globalHandlers,
-		ServerHandlers: serverHandlers,
-		RouteHandlers:  routeHandlers,
-		Services:       services,
-		Upstreams:      upstreams,
-	}, nil
+	return NewRuntimeCompiler().Compile(options)
 }
 
 func mergedTimeout(service config.ServiceOptions, upstream *Upstream) config.TimeoutOptions {
@@ -318,15 +237,6 @@ func mergedTimeout(service config.ServiceOptions, upstream *Upstream) config.Tim
 		timeout.Write = upstream.Options.Timeout.Write
 	}
 	return timeout
-}
-
-func buildBalancer(options config.UpstreamOptions, endpoints []balancer.Endpoint) (balancer.Balancer, error) {
-	switch options.Balancer.Type {
-	case "", "round_robin":
-		return roundrobin.New(endpoints, options.Balancer.Params)
-	default:
-		return nil, fmt.Errorf("balancer type %q is not supported", options.Balancer.Type)
-	}
 }
 
 func resolveTarget(service *Service, upstream *Upstream, endpoint balancer.Endpoint, c *app.RequestContext) proxy.Target {
