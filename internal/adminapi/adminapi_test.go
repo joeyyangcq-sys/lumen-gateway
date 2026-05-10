@@ -192,7 +192,13 @@ func TestHandlerControlPreviewApplyExport(t *testing.T) {
 		},
 		previewResult: controlplane.ApplyPlan{
 			Summary: []controlplane.PlanSummary{{Kind: controlplane.KindRoute, Create: 1}},
-			Changes: []controlplane.ChangeItem{{Kind: controlplane.KindRoute, ID: "1", Action: controlplane.ChangeCreate}},
+			Changes: []controlplane.ChangeItem{{
+				Kind:    controlplane.KindRoute,
+				ID:      "1",
+				Action:  controlplane.ChangeCreate,
+				Title:   "/demo",
+				Summary: map[string]any{"service_id": "svc-1"},
+			}},
 		},
 		applyResult: controlplane.ApplyResult{
 			Counts: map[controlplane.ResourceKind]int{controlplane.KindRoute: 1},
@@ -270,6 +276,9 @@ func TestHandlerControlPreviewApplyExport(t *testing.T) {
 		}
 		if len(svc.lastPreviewOptions.PruneKinds) != 1 || svc.lastPreviewOptions.PruneKinds[0] != controlplane.KindRoute {
 			t.Fatalf("preview prune kinds = %#v", svc.lastPreviewOptions.PruneKinds)
+		}
+		if body := string(c.Response.Body()); !strings.Contains(body, `"title":"/demo"`) || !strings.Contains(body, `"service_id":"svc-1"`) {
+			t.Fatalf("preview body = %s, want title and summary", body)
 		}
 	})
 

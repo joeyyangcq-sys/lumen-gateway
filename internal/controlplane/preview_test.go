@@ -42,6 +42,19 @@ func TestBuildApplyPlanReportsCreateUpdateDeleteAndUnchanged(t *testing.T) {
 	assertChangeAction(t, plan, KindRoute, "new", ChangeCreate)
 	assertChangeAction(t, plan, KindRoute, "drop", ChangeDelete)
 
+	newChange := mustFindChange(t, plan, KindRoute, "new")
+	if newChange.Title != "/created" {
+		t.Fatalf("new change title = %q, want /created", newChange.Title)
+	}
+	if got := newChange.Summary["service_id"]; got != "svc-1" {
+		t.Fatalf("new change summary service_id = %#v, want svc-1", got)
+	}
+
+	deleteChange := mustFindChange(t, plan, KindRoute, "drop")
+	if len(deleteChange.Warnings) == 0 {
+		t.Fatalf("delete warnings = %#v, want at least one warning", deleteChange.Warnings)
+	}
+
 	if len(plan.Summary) != 1 {
 		t.Fatalf("summary len = %d, want 1", len(plan.Summary))
 	}
@@ -83,6 +96,12 @@ func TestBuildApplyPlanUsesManagedKindsForSelectivePrune(t *testing.T) {
 	if change.Action != ChangeDelete || change.PruneSource != "managed_kinds" {
 		t.Fatalf("delete change = %#v", change)
 	}
+	if change.Title != "/drop" {
+		t.Fatalf("delete title = %q, want /drop", change.Title)
+	}
+	if len(change.Warnings) < 2 {
+		t.Fatalf("delete warnings = %#v, want delete + prune warning", change.Warnings)
+	}
 }
 
 func TestBuildApplyPlanExplicitPruneKindsOverrideBundleManagedKinds(t *testing.T) {
@@ -119,6 +138,38 @@ func TestBuildApplyPlanExplicitPruneKindsOverrideBundleManagedKinds(t *testing.T
 	change := mustFindChange(t, plan, KindService, "drop-service")
 	if change.Action != ChangeDelete || change.PruneSource != "explicit_prune_kinds" {
 		t.Fatalf("delete change = %#v", change)
+	}
+}
+
+func TestBuildApplyPlanSummarizesUpstreamChanges(t *testing.T) {
+	svc := New(&exportStore{})
+	bundle := FileBundle{
+		Resources: map[ResourceKind]map[string]json.RawMessage{
+			KindUpstream: {
+				"up-1": json.RawMessage(`{
+					"id":"up-1",
+					"scheme":"https",
+					"pass_host":"rewrite",
+					"upstream_host":"users.internal",
+					"nodes":{"127.0.0.1:9081":1,"127.0.0.1:9082":1}
+				}`),
+			},
+		},
+	}
+
+	plan, err := BuildApplyPlan(context.Background(), svc, bundle, PreviewOptions{})
+	if err != nil {
+		t.Fatalf("BuildApplyPlan() error = %v", err)
+	}
+	change := mustFindChange(t, plan, KindUpstream, "up-1")
+	if change.Title != "up-1" {
+		t.Fatalf("title = %q, want up-1", change.Title)
+	}
+	if got := change.Summary["nodes_count"]; got != 2 {
+		t.Fatalf("nodes_count = %#v, want 2", got)
+	}
+	if got := change.Summary["upstream_host"]; got != "users.internal" {
+		t.Fatalf("upstream_host = %#v, want users.internal", got)
 	}
 }
 

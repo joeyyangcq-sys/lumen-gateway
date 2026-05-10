@@ -317,6 +317,12 @@ Response:
       "kind": "routes",
       "id": "1001",
       "action": "create",
+      "title": "/demo",
+      "summary": {
+        "id": "1001",
+        "uri": "/demo",
+        "service_id": "2001"
+      },
       "after": {
         "id": "1001",
         "uri": "/demo",
@@ -334,6 +340,13 @@ Change actions:
 - `update`
 - `delete`
 - `unchanged`
+
+Preview change metadata:
+
+- `title`: short human-readable label for the UI
+- `summary`: key fields for list rendering without parsing the full body
+- `warnings`: destructive or risky behavior hints
+- `prune_source`: why a delete is happening during prune
 
 Delete previews may also include:
 
