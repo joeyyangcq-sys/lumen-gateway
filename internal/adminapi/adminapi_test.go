@@ -54,6 +54,10 @@ func TestHandlerListGetPutDelete(t *testing.T) {
 		if svc.lastKind != controlplane.KindRoute {
 			t.Fatalf("last kind = %q, want routes", svc.lastKind)
 		}
+		body := string(c.Response.Body())
+		if !strings.Contains(body, `"summary":{"title":"/users"`) {
+			t.Fatalf("list body missing route summary: %s", body)
+		}
 	})
 
 	t.Run("list with page page_size keyword", func(t *testing.T) {
@@ -88,6 +92,9 @@ func TestHandlerListGetPutDelete(t *testing.T) {
 		body := string(c.Response.Body())
 		if !strings.Contains(body, `/orders`) || strings.Contains(body, `/users`) {
 			t.Fatalf("filtered page body = %s", body)
+		}
+		if !strings.Contains(body, `"summary":{"title":"/orders"`) {
+			t.Fatalf("filtered page missing summary: %s", body)
 		}
 	})
 

@@ -169,6 +169,11 @@ type listQuery struct {
 	Keyword  string
 }
 
+type listResourceItem struct {
+	controlplane.Envelope
+	Summary controlplane.ResourceSummary `json:"summary"`
+}
+
 func (h *Handler) handleControl(ctx context.Context, c *app.RequestContext, pathValue string) {
 	trimmed := strings.Trim(strings.TrimPrefix(pathValue, controlPrefix), "/")
 	switch {
@@ -382,8 +387,16 @@ func (h *Handler) handleList(ctx context.Context, c *app.RequestContext, kind co
 	query := parseListQuery(c)
 	filtered := filterEnvelopes(items, query.Keyword)
 	paged := paginateEnvelopes(filtered, query.Page, query.PageSize)
+	responseItems := make([]listResourceItem, 0, len(paged))
+	for _, item := range paged {
+		id, _ := controlplane.ExtractResourceID(item.Value)
+		responseItems = append(responseItems, listResourceItem{
+			Envelope: item,
+			Summary:  controlplane.SummarizeResource(kind, id, item.Value),
+		})
+	}
 	writeJSON(c, http.StatusOK, map[string]any{
-		"list":      paged,
+		"list":      responseItems,
 		"total":     len(filtered),
 		"page":      query.Page,
 		"page_size": query.PageSize,

@@ -87,6 +87,16 @@ Response:
         "uri": "/demo",
         "upstream_id": "2001"
       },
+      "summary": {
+        "title": "/demo",
+        "description": "upstream 2001",
+        "tags": ["/demo"],
+        "fields": {
+          "id": "1001",
+          "uri": "/demo",
+          "upstream_id": "2001"
+        }
+      },
       "createdIndex": 12,
       "modifiedIndex": 15
     }
@@ -97,6 +107,10 @@ Response:
   "keyword": "users"
 }
 ```
+
+Notes:
+
+- `summary` is a UI-friendly digest so list pages do not need to fully parse each resource JSON body just to render title/subtitle/tag rows.
 
 ### 3.2 Get one resource
 
