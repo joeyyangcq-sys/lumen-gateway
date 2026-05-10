@@ -1,0 +1,62 @@
+global_plugins:
+  - name: response_transformer
+    params:
+      add:
+        headers:
+          X-Lumen-Global: "true"
+
+plugins:
+  service-headers:
+    name: response_transformer
+    params:
+      set:
+        headers:
+          X-Lumen-Service: users-service
+
+servers:
+  main:
+    listen: ":18080"
+
+routes:
+  users:
+    methods: ["GET"]
+    paths: ["/api/users"]
+    service: users-service
+    plugins:
+      - name: strip_prefix
+        params:
+          prefix: "/api"
+      - name: request_transformer
+        params:
+          set:
+            query:
+              route: users
+
+services:
+  users-service:
+    protocol: http
+    upstream: users-upstream
+    plugins:
+      - name: request_transformer
+        params:
+          add:
+            query:
+              service: users-service
+      - use: service-headers
+
+upstreams:
+  users-upstream:
+    scheme: http
+    pass_host: rewrite
+    upstream_host: users.internal
+    balancer:
+      type: round_robin
+    endpoints:
+      - address: "127.0.0.1:9001"
+        weight: 1
+    plugins:
+      - name: request_transformer
+        params:
+          add:
+            query:
+              upstream: users-upstream

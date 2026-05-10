@@ -1,0 +1,26 @@
+_meta:
+  format: lumen.apisix.bundle/v1
+  managed_kinds:
+    - routes
+    - services
+    - upstreams
+
+routes:
+  demo-route:
+    id: demo-route
+    uri: /demo
+    service_id: demo-service
+
+services:
+  demo-service:
+    id: demo-service
+    upstream_id: demo-upstream
+
+upstreams:
+  demo-upstream:
+    id: demo-upstream
+    scheme: http
+    pass_host: rewrite
+    upstream_host: demo.internal
+    nodes:
+      "127.0.0.1:9081": 1

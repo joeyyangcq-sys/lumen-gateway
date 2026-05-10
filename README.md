@@ -14,6 +14,7 @@ The project starts with a small gateway core inspired by Bifrost:
 
 - Admin API: `/Users/joey/api-gateway/lumen-gateway/docs/ADMIN_API.md`
 - Architecture and interfaces: `/Users/joey/api-gateway/lumen-gateway/docs/ARCHITECTURE_INTERFACES.md`
+- Usage guide: `/Users/joey/api-gateway/lumen-gateway/docs/USAGE.md`
 
 ## Development
 

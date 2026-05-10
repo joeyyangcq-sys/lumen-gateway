@@ -1,0 +1,37 @@
+servers:
+  main:
+    listen: ":18080"
+
+routes:
+  limited-users:
+    methods: ["GET"]
+    paths: ["/limited/users"]
+    service: users-service
+    plugins:
+      - name: request_id
+        params:
+          header_name: X-Request-Id
+      - name: limit_count
+        params:
+          count: 2
+          time_window: 60
+          key_type: constant
+          key: usage-doc
+          rejected_code: 429
+          rejected_msg: rate limited
+
+services:
+  users-service:
+    protocol: http
+    upstream: users-upstream
+
+upstreams:
+  users-upstream:
+    scheme: http
+    pass_host: rewrite
+    upstream_host: governance.internal
+    balancer:
+      type: round_robin
+    endpoints:
+      - address: "127.0.0.1:9001"
+        weight: 1
