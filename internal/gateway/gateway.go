@@ -152,6 +152,9 @@ func (g *Gateway) ServeHTTP(ctx context.Context, c *app.RequestContext) {
 	}
 	plugin.SetRouteID(c, route.ID)
 	plugin.SetServiceID(c, route.Service)
+	if service := snapshot.Services[route.Service]; service != nil && service.Upstream != nil {
+		plugin.SetUpstreamID(c, service.Upstream.ID)
+	}
 	plugin.SetPhase(c, "request")
 
 	handlers := make([]app.HandlerFunc, 0)

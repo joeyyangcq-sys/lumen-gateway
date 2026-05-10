@@ -184,6 +184,7 @@ func adminCommand() *cli.Command {
 				Flags: []cli.Flag{
 					&cli.StringFlag{Name: "file", Aliases: []string{"f"}, Required: true, Usage: "Bundle file path"},
 					&cli.BoolFlag{Name: "prune", Usage: "Delete managed resources missing from the bundle for included kinds"},
+					&cli.StringSliceFlag{Name: "prune-kind", Usage: "Restrict prune to specific resource kinds (routes, services, upstreams, plugin_configs, global_rules)"},
 				},
 				Action: func(ctx *cli.Context) error {
 					boot, svc, err := loadControlPlaneService(ctx.String("config"))
@@ -198,8 +199,13 @@ func adminCommand() *cli.Command {
 					if err != nil {
 						return err
 					}
+					pruneKinds, err := parseKinds(ctx.StringSlice("prune-kind"))
+					if err != nil {
+						return err
+					}
 					result, err := controlplane.ApplyBundleWithOptions(ctx.Context, svc, bundle, controlplane.ApplyOptions{
-						Prune: ctx.Bool("prune"),
+						Prune:      ctx.Bool("prune"),
+						PruneKinds: pruneKinds,
 					})
 					if err != nil {
 						return err
@@ -214,6 +220,7 @@ func adminCommand() *cli.Command {
 				Usage: "Export current APISIX resources from etcd to a bundle file",
 				Flags: []cli.Flag{
 					&cli.StringFlag{Name: "out", Aliases: []string{"o"}, Required: true, Usage: "Output bundle file path"},
+					&cli.StringSliceFlag{Name: "kind", Usage: "Export only specific resource kinds (routes, services, upstreams, plugin_configs, global_rules)"},
 				},
 				Action: func(ctx *cli.Context) error {
 					boot, svc, err := loadControlPlaneService(ctx.String("config"))
@@ -224,7 +231,15 @@ func adminCommand() *cli.Command {
 					if boot.Gateway.Source != "etcd_apisix" {
 						return errors.New("admin export requires gateway.source=etcd_apisix")
 					}
-					bundle, err := controlplane.ExportBundle(ctx.Context, svc)
+					kinds, err := parseKinds(ctx.StringSlice("kind"))
+					if err != nil {
+						return err
+					}
+					bundle, err := controlplane.ExportBundleWithOptions(ctx.Context, svc, controlplane.ExportOptions{
+						EtcdPrefix:   boot.Etcd.Prefix,
+						IncludeKinds: kinds,
+						IncludeMeta:  true,
+					})
 					if err != nil {
 						return err
 					}
@@ -242,6 +257,7 @@ func adminCommand() *cli.Command {
 					&cli.StringFlag{Name: "file", Aliases: []string{"f"}, Required: true, Usage: "Bundle file path"},
 					&cli.BoolFlag{Name: "watch", Usage: "Keep polling the file and reapply on change"},
 					&cli.BoolFlag{Name: "prune", Usage: "Delete managed resources missing from the bundle for included kinds"},
+					&cli.StringSliceFlag{Name: "prune-kind", Usage: "Restrict prune to specific resource kinds (routes, services, upstreams, plugin_configs, global_rules)"},
 					&cli.DurationFlag{Name: "interval", Value: time.Second, Usage: "Poll interval when --watch is enabled"},
 				},
 				Action: func(ctx *cli.Context) error {
@@ -254,12 +270,17 @@ func adminCommand() *cli.Command {
 						return errors.New("admin sync requires gateway.source=etcd_apisix")
 					}
 					if !ctx.Bool("watch") {
+						pruneKinds, err := parseKinds(ctx.StringSlice("prune-kind"))
+						if err != nil {
+							return err
+						}
 						bundle, err := controlplane.LoadBundleFile(ctx.String("file"))
 						if err != nil {
 							return err
 						}
 						result, err := controlplane.ApplyBundleWithOptions(ctx.Context, svc, bundle, controlplane.ApplyOptions{
-							Prune: ctx.Bool("prune"),
+							Prune:      ctx.Bool("prune"),
+							PruneKinds: pruneKinds,
 						})
 						if err != nil {
 							return err
@@ -269,12 +290,17 @@ func adminCommand() *cli.Command {
 						return nil
 					}
 
+					pruneKinds, err := parseKinds(ctx.StringSlice("prune-kind"))
+					if err != nil {
+						return err
+					}
 					runCtx, cancel := signal.NotifyContext(ctx.Context, syscall.SIGINT, syscall.SIGTERM)
 					defer cancel()
 					fmt.Printf("watching bundle %s\n", ctx.String("file"))
 					return controlplane.SyncBundleFile(runCtx, svc, ctx.String("file"), controlplane.SyncOptions{
 						PollInterval: ctx.Duration("interval"),
 						Prune:        ctx.Bool("prune"),
+						PruneKinds:   pruneKinds,
 						OnApply:      printApplyResult,
 					})
 				},
@@ -301,4 +327,19 @@ func printApplyResult(result controlplane.ApplyResult) {
 			fmt.Printf("%s=%d\n", kind, count)
 		}
 	}
+}
+
+func parseKinds(values []string) ([]controlplane.ResourceKind, error) {
+	if len(values) == 0 {
+		return nil, nil
+	}
+	kinds := make([]controlplane.ResourceKind, 0, len(values))
+	for _, value := range values {
+		kind, ok := controlplane.ParseKind(value)
+		if !ok {
+			return nil, fmt.Errorf("unsupported resource kind: %s", value)
+		}
+		kinds = append(kinds, kind)
+	}
+	return kinds, nil
 }

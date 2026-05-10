@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/cloudwego/hertz/pkg/app"
@@ -14,6 +15,7 @@ import (
 )
 
 const routePrefix = "/apisix/admin/"
+const controlPrefix = "/apisix/admin/control/"
 
 type service interface {
 	List(ctx context.Context, kind controlplane.ResourceKind) ([]controlplane.Envelope, error)
@@ -22,6 +24,12 @@ type service interface {
 	Post(ctx context.Context, kind controlplane.ResourceKind, body json.RawMessage) (controlplane.Envelope, error)
 	Patch(ctx context.Context, kind controlplane.ResourceKind, id string, body json.RawMessage) (controlplane.Envelope, error)
 	Delete(ctx context.Context, kind controlplane.ResourceKind, id string) (controlplane.DeleteResult, error)
+	PreviewBundle(ctx context.Context, bundle controlplane.FileBundle, options controlplane.PreviewOptions) (controlplane.ApplyPlan, error)
+	ApplyBundle(ctx context.Context, bundle controlplane.FileBundle, options controlplane.ApplyOptions) (controlplane.ApplyResult, error)
+	ExportBundle(ctx context.Context, options controlplane.ExportOptions) (controlplane.FileBundle, error)
+	SaveHistorySnapshot(ctx context.Context, source string) (controlplane.HistoryEntry, error)
+	ListHistory(ctx context.Context, limit int) ([]controlplane.HistoryEntry, error)
+	RollbackHistory(ctx context.Context, id string) (controlplane.ApplyResult, controlplane.HistoryEntry, error)
 	Close() error
 }
 
@@ -38,7 +46,14 @@ func New(boot bootstrap.Options) (*Handler, error) {
 	if err != nil {
 		return nil, err
 	}
-	return NewWithService(controlplane.New(store), boot.Admin.Key), nil
+	historyStore, err := controlplane.NewEtcdHistoryStore(boot)
+	if err != nil {
+		return nil, err
+	}
+	return NewWithService(controlplane.New(
+		store,
+		controlplane.WithHistory(historyStore, 10, controlplane.ExportOptions{EtcdPrefix: boot.Etcd.Prefix}),
+	), boot.Admin.Key), nil
 }
 
 func NewWithService(svc service, adminKey string) *Handler {
@@ -56,7 +71,19 @@ func (h *Handler) Close() error {
 }
 
 func (h *Handler) ServeHTTP(ctx context.Context, c *app.RequestContext) bool {
-	if h == nil || !strings.HasPrefix(string(c.Path()), routePrefix) {
+	if h == nil {
+		return false
+	}
+	pathValue := string(c.Path())
+	if strings.HasPrefix(pathValue, controlPrefix) {
+		if !h.authorized(c) {
+			writeError(c, http.StatusUnauthorized, "missing or invalid X-API-KEY")
+			return true
+		}
+		h.handleControl(ctx, c, pathValue)
+		return true
+	}
+	if !strings.HasPrefix(pathValue, routePrefix) {
 		return false
 	}
 	if !h.authorized(c) {
@@ -64,7 +91,7 @@ func (h *Handler) ServeHTTP(ctx context.Context, c *app.RequestContext) bool {
 		return true
 	}
 
-	resource, id, ok := parsePath(string(c.Path()))
+	resource, id, ok := parsePath(pathValue)
 	if !ok {
 		writeError(c, http.StatusNotFound, "unsupported admin path")
 		return true
@@ -103,6 +130,162 @@ func (h *Handler) ServeHTTP(ctx context.Context, c *app.RequestContext) bool {
 		writeError(c, http.StatusMethodNotAllowed, "unsupported method")
 		return true
 	}
+}
+
+type bundleRequest struct {
+	Bundle           json.RawMessage `json:"bundle"`
+	Content          string          `json:"content"`
+	Prune            bool            `json:"prune"`
+	PruneKinds       []string        `json:"prune_kinds"`
+	IncludeUnchanged bool            `json:"include_unchanged"`
+}
+
+func (h *Handler) handleControl(ctx context.Context, c *app.RequestContext, pathValue string) {
+	trimmed := strings.Trim(strings.TrimPrefix(pathValue, controlPrefix), "/")
+	switch {
+	case trimmed == "imports/preview" && string(c.Method()) == http.MethodPost:
+		h.handleImportPreview(ctx, c)
+	case trimmed == "imports/apply" && string(c.Method()) == http.MethodPost:
+		h.handleImportApply(ctx, c)
+	case trimmed == "exports" && string(c.Method()) == http.MethodGet:
+		h.handleExport(ctx, c)
+	case trimmed == "history" && string(c.Method()) == http.MethodGet:
+		h.handleHistoryList(ctx, c)
+	case strings.HasPrefix(trimmed, "history/") && strings.HasSuffix(trimmed, "/rollback") && string(c.Method()) == http.MethodPost:
+		h.handleHistoryRollback(ctx, c, trimmed)
+	default:
+		writeError(c, http.StatusNotFound, "unsupported control path")
+	}
+}
+
+func (h *Handler) handleImportPreview(ctx context.Context, c *app.RequestContext) {
+	request, bundle, err := decodeBundleRequest(c.Request.Body())
+	if err != nil {
+		writeMappedError(c, err)
+		return
+	}
+	pruneKinds, err := parseKinds(request.PruneKinds)
+	if err != nil {
+		writeMappedError(c, err)
+		return
+	}
+	plan, err := h.service.PreviewBundle(ctx, bundle, controlplane.PreviewOptions{
+		Prune:            request.Prune,
+		PruneKinds:       pruneKinds,
+		IncludeUnchanged: request.IncludeUnchanged,
+	})
+	if err != nil {
+		writeMappedError(c, err)
+		return
+	}
+	writeJSON(c, http.StatusOK, plan)
+}
+
+func (h *Handler) handleImportApply(ctx context.Context, c *app.RequestContext) {
+	request, bundle, err := decodeBundleRequest(c.Request.Body())
+	if err != nil {
+		writeMappedError(c, err)
+		return
+	}
+	pruneKinds, err := parseKinds(request.PruneKinds)
+	if err != nil {
+		writeMappedError(c, err)
+		return
+	}
+	result, err := h.service.ApplyBundle(ctx, bundle, controlplane.ApplyOptions{
+		Prune:      request.Prune,
+		PruneKinds: pruneKinds,
+	})
+	if err != nil {
+		writeMappedError(c, err)
+		return
+	}
+	history, err := h.service.SaveHistorySnapshot(ctx, "control_import_apply")
+	if err != nil {
+		writeMappedError(c, err)
+		return
+	}
+	writeJSON(c, http.StatusOK, map[string]any{
+		"result":  result,
+		"history": history,
+	})
+}
+
+func (h *Handler) handleExport(ctx context.Context, c *app.RequestContext) {
+	kinds, err := parseKinds(headersOrQueryList(c, "kind"))
+	if err != nil {
+		writeMappedError(c, err)
+		return
+	}
+	format := strings.ToLower(strings.TrimSpace(queryValue(c, "format")))
+	if format == "" {
+		format = "json"
+	}
+	bundle, err := h.service.ExportBundle(ctx, controlplane.ExportOptions{
+		IncludeKinds: kinds,
+		IncludeMeta:  true,
+	})
+	if err != nil {
+		writeMappedError(c, err)
+		return
+	}
+	switch format {
+	case "json":
+		payload, err := bundle.ToMap()
+		if err != nil {
+			writeMappedError(c, err)
+			return
+		}
+		writeJSON(c, http.StatusOK, payload)
+	case "yaml":
+		content, err := bundle.ToYAML()
+		if err != nil {
+			writeMappedError(c, err)
+			return
+		}
+		writeJSON(c, http.StatusOK, map[string]any{
+			"format":  "yaml",
+			"content": string(content),
+		})
+	default:
+		writeError(c, http.StatusBadRequest, "unsupported export format")
+	}
+}
+
+func (h *Handler) handleHistoryList(ctx context.Context, c *app.RequestContext) {
+	limit := 10
+	if raw := strings.TrimSpace(queryValue(c, "limit")); raw != "" {
+		if value, err := strconv.Atoi(raw); err == nil && value > 0 {
+			limit = value
+		}
+	}
+	items, err := h.service.ListHistory(ctx, limit)
+	if err != nil {
+		writeMappedError(c, err)
+		return
+	}
+	writeJSON(c, http.StatusOK, map[string]any{
+		"list":  items,
+		"total": len(items),
+	})
+}
+
+func (h *Handler) handleHistoryRollback(ctx context.Context, c *app.RequestContext, trimmed string) {
+	id := strings.TrimSuffix(strings.TrimPrefix(trimmed, "history/"), "/rollback")
+	id = strings.Trim(id, "/")
+	if id == "" {
+		writeError(c, http.StatusBadRequest, "history id is required")
+		return
+	}
+	result, history, err := h.service.RollbackHistory(ctx, id)
+	if err != nil {
+		writeMappedError(c, err)
+		return
+	}
+	writeJSON(c, http.StatusOK, map[string]any{
+		"result":  result,
+		"history": history,
+	})
 }
 
 func (h *Handler) authorized(c *app.RequestContext) bool {
@@ -201,14 +384,64 @@ func parsePath(pathValue string) (resource, id string, ok bool) {
 func writeMappedError(c *app.RequestContext, err error) {
 	switch {
 	case errors.Is(err, controlplane.ErrNotFound):
-		writeError(c, http.StatusNotFound, err.Error())
+		writeMessage(c, http.StatusNotFound, "Key not found")
 	case errors.Is(err, controlplane.ErrInvalidBody):
 		writeError(c, http.StatusBadRequest, err.Error())
 	case errors.Is(err, controlplane.ErrUnsupportedKind):
-		writeError(c, http.StatusNotFound, err.Error())
+		writeMessage(c, http.StatusNotFound, "Key not found")
 	default:
 		writeError(c, http.StatusBadGateway, err.Error())
 	}
+}
+
+func decodeBundleRequest(body []byte) (bundleRequest, controlplane.FileBundle, error) {
+	var request bundleRequest
+	if err := json.Unmarshal(body, &request); err != nil {
+		return bundleRequest{}, controlplane.FileBundle{}, controlplane.ErrInvalidBody
+	}
+	switch {
+	case len(request.Bundle) > 0:
+		encoded, err := json.Marshal(request.Bundle)
+		if err != nil {
+			return bundleRequest{}, controlplane.FileBundle{}, controlplane.ErrInvalidBody
+		}
+		bundle, err := controlplane.ParseBundle(encoded)
+		return request, bundle, err
+	case strings.TrimSpace(request.Content) != "":
+		bundle, err := controlplane.ParseBundle([]byte(request.Content))
+		return request, bundle, err
+	default:
+		return bundleRequest{}, controlplane.FileBundle{}, controlplane.ErrInvalidBody
+	}
+}
+
+func parseKinds(values []string) ([]controlplane.ResourceKind, error) {
+	if len(values) == 0 {
+		return nil, nil
+	}
+	kinds := make([]controlplane.ResourceKind, 0, len(values))
+	for _, value := range values {
+		kind, ok := controlplane.ParseKind(value)
+		if !ok {
+			return nil, controlplane.ErrInvalidBody
+		}
+		kinds = append(kinds, kind)
+	}
+	return kinds, nil
+}
+
+func headersOrQueryList(c *app.RequestContext, key string) []string {
+	out := make([]string, 0, 1)
+	c.QueryArgs().VisitAll(func(k, value []byte) {
+		if string(k) == key {
+			out = append(out, string(value))
+		}
+	})
+	return out
+}
+
+func queryValue(c *app.RequestContext, key string) string {
+	return string(c.QueryArgs().Peek(key))
 }
 
 func writeAPISIXBody(c *app.RequestContext, status int, payload any) {
@@ -229,5 +462,11 @@ func writeJSON(c *app.RequestContext, status int, payload any) {
 func writeError(c *app.RequestContext, status int, message string) {
 	writeJSON(c, status, map[string]any{
 		"error_msg": message,
+	})
+}
+
+func writeMessage(c *app.RequestContext, status int, message string) {
+	writeJSON(c, status, map[string]any{
+		"message": message,
 	})
 }

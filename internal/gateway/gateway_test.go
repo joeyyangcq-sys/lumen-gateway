@@ -85,6 +85,9 @@ func TestServeHTTPProxiesToMatchedUpstream(t *testing.T) {
 	if got := gotQuery.Get("matched_route"); got != "user-api" {
 		t.Fatalf("matched_route query = %q, want user-api", got)
 	}
+	if got := gotQuery.Get("route_upstream"); got != "user-upstream" {
+		t.Fatalf("route_upstream query = %q, want user-upstream", got)
+	}
 	if got := gotQuery.Get("service"); got != "user-service" {
 		t.Fatalf("service query = %q, want user-service", got)
 	}
@@ -382,7 +385,10 @@ func gatewayOptions(endpointAddress string) config.Options {
 						Params: map[string]any{
 							"host": "users.internal",
 							"set": map[string]any{
-								"query": map[string]string{"matched_route": "$route_id"},
+								"query": map[string]string{
+									"matched_route":  "$route_id",
+									"route_upstream": "$upstream_id",
+								},
 							},
 						},
 					},

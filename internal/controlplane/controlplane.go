@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strconv"
 	"time"
@@ -43,11 +44,12 @@ type Envelope struct {
 
 type DeleteResult struct {
 	Key     string `json:"key"`
-	Deleted int64  `json:"deleted"`
+	Deleted int64  `json:"deleted,string"`
 }
 
 type ApplyOptions struct {
-	Prune bool
+	Prune      bool
+	PruneKinds []ResourceKind
 }
 
 type Store interface {
@@ -58,19 +60,54 @@ type Store interface {
 	Close() error
 }
 
+type Option func(*Service)
+
 type Service struct {
-	store Store
+	store         Store
+	history       HistoryStore
+	historyLimit  int
+	exportOptions ExportOptions
 }
 
-func New(store Store) *Service {
-	return &Service{store: store}
+func New(store Store, opts ...Option) *Service {
+	svc := &Service{
+		store:        store,
+		historyLimit: 10,
+		exportOptions: ExportOptions{
+			IncludeMeta: true,
+		},
+	}
+	for _, opt := range opts {
+		opt(svc)
+	}
+	return svc
+}
+
+func WithHistory(store HistoryStore, limit int, exportOptions ExportOptions) Option {
+	return func(s *Service) {
+		s.history = store
+		if limit > 0 {
+			s.historyLimit = limit
+		}
+		exportOptions.IncludeMeta = true
+		s.exportOptions = exportOptions
+	}
 }
 
 func (s *Service) Close() error {
-	if s == nil || s.store == nil {
+	if s == nil {
 		return nil
 	}
-	return s.store.Close()
+	var err error
+	if s.store != nil {
+		err = s.store.Close()
+	}
+	if s.history != nil {
+		if closeErr := s.history.Close(); err == nil {
+			err = closeErr
+		}
+	}
+	return err
 }
 
 func (s *Service) List(ctx context.Context, kind ResourceKind) ([]Envelope, error) {
@@ -97,7 +134,7 @@ func (s *Service) Put(ctx context.Context, kind ResourceKind, id string, body js
 	if id == "" {
 		return Envelope{}, fmt.Errorf("%w: resource id is required", ErrInvalidBody)
 	}
-	normalized, err := NormalizeResourceBody(body, id)
+	normalized, err := s.normalizeForWrite(ctx, kind, id, body)
 	if err != nil {
 		return Envelope{}, err
 	}
@@ -115,7 +152,7 @@ func (s *Service) Post(ctx context.Context, kind ResourceKind, body json.RawMess
 	if id == "" {
 		id = generateResourceID()
 	}
-	normalized, err := NormalizeResourceBody(body, id)
+	normalized, err := s.normalizeForWrite(ctx, kind, id, body)
 	if err != nil {
 		return Envelope{}, err
 	}
@@ -137,7 +174,7 @@ func (s *Service) Patch(ctx context.Context, kind ResourceKind, id string, patch
 	if err != nil {
 		return Envelope{}, err
 	}
-	normalized, err := NormalizeResourceBody(merged, id)
+	normalized, err := s.normalizeForWrite(ctx, kind, id, merged)
 	if err != nil {
 		return Envelope{}, err
 	}
@@ -154,6 +191,64 @@ func (s *Service) Delete(ctx context.Context, kind ResourceKind, id string) (Del
 	return s.store.Delete(ctx, kind, id)
 }
 
+func (s *Service) PreviewBundle(ctx context.Context, bundle FileBundle, options PreviewOptions) (ApplyPlan, error) {
+	return BuildApplyPlan(ctx, s, bundle, options)
+}
+
+func (s *Service) ApplyBundle(ctx context.Context, bundle FileBundle, options ApplyOptions) (ApplyResult, error) {
+	return ApplyBundleWithOptions(ctx, s, bundle, options)
+}
+
+func (s *Service) ExportBundle(ctx context.Context, options ExportOptions) (FileBundle, error) {
+	return ExportBundleWithOptions(ctx, s, options)
+}
+
+func (s *Service) SaveHistorySnapshot(ctx context.Context, source string) (HistoryEntry, error) {
+	if s.history == nil {
+		return HistoryEntry{}, nil
+	}
+	bundle, err := ExportBundleWithOptions(ctx, s, s.exportOptions)
+	if err != nil {
+		return HistoryEntry{}, err
+	}
+	entry := HistoryEntry{
+		ID:        generateResourceID(),
+		CreatedAt: time.Now().UTC().Format(time.RFC3339),
+		Source:    source,
+		Bundle:    bundle,
+	}
+	return s.history.Save(ctx, entry, s.historyLimit)
+}
+
+func (s *Service) ListHistory(ctx context.Context, limit int) ([]HistoryEntry, error) {
+	if s.history == nil {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = s.historyLimit
+	}
+	return s.history.List(ctx, limit)
+}
+
+func (s *Service) RollbackHistory(ctx context.Context, id string) (ApplyResult, HistoryEntry, error) {
+	if s.history == nil {
+		return ApplyResult{}, HistoryEntry{}, ErrNotFound
+	}
+	entry, err := s.history.Get(ctx, id)
+	if err != nil {
+		return ApplyResult{}, HistoryEntry{}, err
+	}
+	result, err := ApplyBundleWithOptions(ctx, s, entry.Bundle, ApplyOptions{
+		Prune:      true,
+		PruneKinds: entry.Bundle.Meta.ManagedKinds,
+	})
+	if err != nil {
+		return ApplyResult{}, HistoryEntry{}, err
+	}
+	_, saveErr := s.SaveHistorySnapshot(ctx, "rollback:"+id)
+	return result, entry, saveErr
+}
+
 func SupportedKinds() []ResourceKind {
 	return append([]ResourceKind(nil), supportedKinds...)
 }
@@ -164,9 +259,9 @@ func ParseKind(raw string) (ResourceKind, bool) {
 }
 
 func NormalizeResourceBody(data []byte, id string) (json.RawMessage, error) {
-	var decoded map[string]any
-	if err := json.Unmarshal(data, &decoded); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInvalidBody, err)
+	decoded, err := decodeJSONObject(data)
+	if err != nil {
+		return nil, err
 	}
 	decoded["id"] = id
 	normalized, err := json.Marshal(decoded)
@@ -198,6 +293,53 @@ func validateKind(kind ResourceKind) error {
 		return nil
 	}
 	return fmt.Errorf("%w: %s", ErrUnsupportedKind, kind)
+}
+
+func (s *Service) normalizeForWrite(ctx context.Context, kind ResourceKind, id string, body json.RawMessage) (json.RawMessage, error) {
+	decoded, err := decodeJSONObject(body)
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now().Unix()
+	decoded["id"] = id
+
+	existing, getErr := s.store.Get(ctx, kind, id)
+	switch {
+	case getErr == nil:
+		existingDecoded, err := decodeJSONObject(existing.Value)
+		if err != nil {
+			return nil, err
+		}
+		if created, ok := existingDecoded["create_time"]; ok {
+			decoded["create_time"] = created
+		} else {
+			decoded["create_time"] = now
+		}
+	case errors.Is(getErr, ErrNotFound):
+		decoded["create_time"] = now
+	case getErr != nil:
+		return nil, getErr
+	}
+	decoded["update_time"] = now
+
+	normalized, err := json.Marshal(decoded)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidBody, err)
+	}
+	return normalized, nil
+}
+
+func decodeJSONObject(data []byte) (map[string]any, error) {
+	var decoded map[string]any
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidBody, err)
+	}
+	if decoded == nil {
+		decoded = map[string]any{}
+	} else {
+		decoded = maps.Clone(decoded)
+	}
+	return decoded, nil
 }
 
 func mergeJSON(baseData, patchData []byte) (json.RawMessage, error) {

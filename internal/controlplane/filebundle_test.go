@@ -5,12 +5,18 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
 
 func TestParseBundleSupportsMapsAndArrays(t *testing.T) {
 	bundle, err := ParseBundle([]byte(`
+_meta:
+  format: lumen.apisix.bundle/v1
+  managed_kinds:
+    - routes
+    - services
 upstreams:
   up-1:
     scheme: http
@@ -35,6 +41,12 @@ routes:
 	}
 	if got := string(bundle.Resources[KindRoute]["route-1"]); got == "" {
 		t.Fatal("route resource missing")
+	}
+	if bundle.Meta.Format != "lumen.apisix.bundle/v1" {
+		t.Fatalf("bundle meta format = %q", bundle.Meta.Format)
+	}
+	if len(bundle.Meta.ManagedKinds) != 2 || bundle.Meta.ManagedKinds[0] != KindRoute || bundle.Meta.ManagedKinds[1] != KindService {
+		t.Fatalf("bundle managed kinds = %#v", bundle.Meta.ManagedKinds)
 	}
 }
 
@@ -91,6 +103,74 @@ func TestApplyBundleWithPruneDeletesMissingResources(t *testing.T) {
 	}
 }
 
+func TestApplyBundleWithPruneOnlyTouchesSelectedKinds(t *testing.T) {
+	store := &pruneStore{
+		recordingStore: recordingStore{},
+		exportStore: exportStore{
+			listResults: map[ResourceKind][]Envelope{
+				KindRoute: {
+					{Key: "/apisix/routes/drop-route", Value: json.RawMessage(`{"id":"drop-route","uri":"/drop","service_id":"svc-1"}`)},
+				},
+				KindService: {
+					{Key: "/apisix/services/drop-service", Value: json.RawMessage(`{"id":"drop-service","upstream_id":"up-1"}`)},
+				},
+			},
+		},
+	}
+	svc := New(store)
+	bundle := FileBundle{
+		Resources: map[ResourceKind]map[string]json.RawMessage{
+			KindRoute: {
+				"keep-route": json.RawMessage(`{"id":"keep-route","uri":"/keep","service_id":"svc-1"}`),
+			},
+		},
+	}
+
+	_, err := ApplyBundleWithOptions(context.Background(), svc, bundle, ApplyOptions{
+		Prune:      true,
+		PruneKinds: []ResourceKind{KindRoute},
+	})
+	if err != nil {
+		t.Fatalf("ApplyBundleWithOptions() error = %v", err)
+	}
+	if len(store.deleted) != 1 || store.deleted[0] != "routes:drop-route" {
+		t.Fatalf("deleted = %#v, want only routes:drop-route", store.deleted)
+	}
+}
+
+func TestApplyBundleWithPruneUsesBundleManagedKinds(t *testing.T) {
+	store := &pruneStore{
+		recordingStore: recordingStore{},
+		exportStore: exportStore{
+			listResults: map[ResourceKind][]Envelope{
+				KindRoute: {
+					{Key: "/apisix/routes/drop-route", Value: json.RawMessage(`{"id":"drop-route","uri":"/drop","service_id":"svc-1"}`)},
+				},
+				KindService: {
+					{Key: "/apisix/services/drop-service", Value: json.RawMessage(`{"id":"drop-service","upstream_id":"up-1"}`)},
+				},
+			},
+		},
+	}
+	svc := New(store)
+	bundle := FileBundle{
+		Meta: BundleMeta{ManagedKinds: []ResourceKind{KindRoute}},
+		Resources: map[ResourceKind]map[string]json.RawMessage{
+			KindRoute: {
+				"keep-route": json.RawMessage(`{"id":"keep-route","uri":"/keep","service_id":"svc-1"}`),
+			},
+		},
+	}
+
+	_, err := ApplyBundleWithOptions(context.Background(), svc, bundle, ApplyOptions{Prune: true})
+	if err != nil {
+		t.Fatalf("ApplyBundleWithOptions() error = %v", err)
+	}
+	if len(store.deleted) != 1 || store.deleted[0] != "routes:drop-route" {
+		t.Fatalf("deleted = %#v, want only routes:drop-route", store.deleted)
+	}
+}
+
 func TestExportBundleAndWriteFile(t *testing.T) {
 	svc := New(&exportStore{
 		listResults: map[ResourceKind][]Envelope{
@@ -100,12 +180,21 @@ func TestExportBundleAndWriteFile(t *testing.T) {
 		},
 	})
 
-	bundle, err := ExportBundle(context.Background(), svc)
+	bundle, err := ExportBundleWithOptions(context.Background(), svc, ExportOptions{
+		EtcdPrefix:  "/apisix",
+		IncludeMeta: true,
+	})
 	if err != nil {
 		t.Fatalf("ExportBundle() error = %v", err)
 	}
 	if _, ok := bundle.Resources[KindRoute]["1"]; !ok {
 		t.Fatalf("exported bundle missing route 1")
+	}
+	if bundle.Meta.Format == "" || bundle.Meta.EtcdPrefix != "/apisix" {
+		t.Fatalf("bundle meta = %#v", bundle.Meta)
+	}
+	if len(bundle.Meta.ManagedKinds) != len(SupportedKinds()) {
+		t.Fatalf("managed kinds = %#v", bundle.Meta.ManagedKinds)
 	}
 
 	dir := t.TempDir()
@@ -119,6 +208,9 @@ func TestExportBundleAndWriteFile(t *testing.T) {
 	}
 	if len(data) == 0 {
 		t.Fatal("written bundle is empty")
+	}
+	if !strings.Contains(string(data), "_meta:") || !strings.Contains(string(data), "managed_kinds:") {
+		t.Fatalf("written bundle missing metadata:\n%s", data)
 	}
 }
 

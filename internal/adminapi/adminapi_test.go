@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/cloudwego/hertz/pkg/app"
@@ -126,6 +127,9 @@ func TestHandlerListGetPutDelete(t *testing.T) {
 		if svc.lastID != "9" {
 			t.Fatalf("last id = %q, want 9", svc.lastID)
 		}
+		if body := string(c.Response.Body()); !strings.Contains(body, `"deleted":"1"`) {
+			t.Fatalf("delete body = %s, want deleted as string", body)
+		}
 	})
 }
 
@@ -149,6 +153,9 @@ func TestHandlerMapsServiceErrors(t *testing.T) {
 			handler.ServeHTTP(context.Background(), c)
 			if got := c.Response.StatusCode(); got != tt.wantStatus {
 				t.Fatalf("status = %d, want %d", got, tt.wantStatus)
+			}
+			if errors.Is(tt.err, controlplane.ErrNotFound) && !strings.Contains(string(c.Response.Body()), `"message":"Key not found"`) {
+				t.Fatalf("not found body = %s", c.Response.Body())
 			}
 		})
 	}
@@ -174,23 +181,173 @@ func TestHandlerIgnoresNonAdminPaths(t *testing.T) {
 	}
 }
 
-type fakeService struct {
-	listResult   []controlplane.Envelope
-	listErr      error
-	getResult    controlplane.Envelope
-	getErr       error
-	putResult    controlplane.Envelope
-	putErr       error
-	postResult   controlplane.Envelope
-	postErr      error
-	patchResult  controlplane.Envelope
-	patchErr     error
-	deleteResult controlplane.DeleteResult
-	deleteErr    error
+func TestHandlerControlPreviewApplyExport(t *testing.T) {
+	svc := &fakeService{
+		previewResult: controlplane.ApplyPlan{
+			Summary: []controlplane.PlanSummary{{Kind: controlplane.KindRoute, Create: 1}},
+			Changes: []controlplane.ChangeItem{{Kind: controlplane.KindRoute, ID: "1", Action: controlplane.ChangeCreate}},
+		},
+		applyResult: controlplane.ApplyResult{
+			Counts: map[controlplane.ResourceKind]int{controlplane.KindRoute: 1},
+		},
+		exportResult: controlplane.FileBundle{
+			Meta: controlplane.BundleMeta{
+				Format:       "lumen.apisix.bundle/v1",
+				ManagedKinds: []controlplane.ResourceKind{controlplane.KindRoute},
+			},
+			Resources: map[controlplane.ResourceKind]map[string]json.RawMessage{
+				controlplane.KindRoute: {
+					"1": json.RawMessage(`{"id":"1","uri":"/demo"}`),
+				},
+			},
+		},
+		historyResult: controlplane.HistoryEntry{
+			ID:        "h1",
+			CreatedAt: "2026-05-10T00:00:00Z",
+			Source:    "control_import_apply",
+		},
+		historyListResult: []controlplane.HistoryEntry{
+			{ID: "h2", CreatedAt: "2026-05-10T01:00:00Z", Source: "rollback:h1"},
+			{ID: "h1", CreatedAt: "2026-05-10T00:00:00Z", Source: "control_import_apply"},
+		},
+		rollbackResult: controlplane.ApplyResult{
+			Counts: map[controlplane.ResourceKind]int{controlplane.KindRoute: 1},
+		},
+		rollbackHistory: controlplane.HistoryEntry{
+			ID:        "h1",
+			CreatedAt: "2026-05-10T00:00:00Z",
+			Source:    "control_import_apply",
+		},
+	}
+	handler := NewWithService(svc, "secret")
 
-	lastKind controlplane.ResourceKind
-	lastID   string
-	lastBody json.RawMessage
+	t.Run("preview", func(t *testing.T) {
+		c := newRequestContext("POST", "/apisix/admin/control/imports/preview", []byte(`{"bundle":{"routes":{"1":{"uri":"/demo"}}},"prune":true,"prune_kinds":["routes"],"include_unchanged":true}`))
+		c.Request.Header.Set("X-API-KEY", "secret")
+		handler.ServeHTTP(context.Background(), c)
+		if got := c.Response.StatusCode(); got != 200 {
+			t.Fatalf("status = %d, want 200", got)
+		}
+		if !svc.lastPreviewOptions.Prune || !svc.lastPreviewOptions.IncludeUnchanged {
+			t.Fatalf("preview options = %#v", svc.lastPreviewOptions)
+		}
+		if len(svc.lastPreviewOptions.PruneKinds) != 1 || svc.lastPreviewOptions.PruneKinds[0] != controlplane.KindRoute {
+			t.Fatalf("preview prune kinds = %#v", svc.lastPreviewOptions.PruneKinds)
+		}
+	})
+
+	t.Run("apply", func(t *testing.T) {
+		c := newRequestContext("POST", "/apisix/admin/control/imports/apply", []byte(`{"content":"routes:\n  1:\n    uri: /demo\n","prune":true}`))
+		c.Request.Header.Set("X-API-KEY", "secret")
+		handler.ServeHTTP(context.Background(), c)
+		if got := c.Response.StatusCode(); got != 200 {
+			t.Fatalf("status = %d, want 200", got)
+		}
+		if !svc.lastApplyOptions.Prune {
+			t.Fatalf("apply options = %#v", svc.lastApplyOptions)
+		}
+		if body := string(c.Response.Body()); !strings.Contains(body, `"routes":1`) {
+			t.Fatalf("apply body = %s", body)
+		}
+		if !strings.Contains(string(c.Response.Body()), `"history":{"id":"h1"`) {
+			t.Fatalf("apply body missing history = %s", c.Response.Body())
+		}
+	})
+
+	t.Run("export json", func(t *testing.T) {
+		c := newRequestContext("GET", "/apisix/admin/control/exports?kind=routes", nil)
+		c.Request.Header.Set("X-API-KEY", "secret")
+		handler.ServeHTTP(context.Background(), c)
+		if got := c.Response.StatusCode(); got != 200 {
+			t.Fatalf("status = %d, want 200", got)
+		}
+		if len(svc.lastExportOptions.IncludeKinds) != 1 || svc.lastExportOptions.IncludeKinds[0] != controlplane.KindRoute {
+			t.Fatalf("export kinds = %#v", svc.lastExportOptions.IncludeKinds)
+		}
+		if body := string(c.Response.Body()); !strings.Contains(body, `"_meta"`) {
+			t.Fatalf("export body = %s", body)
+		}
+	})
+
+	t.Run("export yaml", func(t *testing.T) {
+		c := newRequestContext("GET", "/apisix/admin/control/exports?format=yaml", nil)
+		c.Request.Header.Set("X-API-KEY", "secret")
+		handler.ServeHTTP(context.Background(), c)
+		if got := c.Response.StatusCode(); got != 200 {
+			t.Fatalf("status = %d, want 200", got)
+		}
+		if body := string(c.Response.Body()); !strings.Contains(body, `"content":"_meta:`) {
+			t.Fatalf("yaml export body = %s", body)
+		}
+	})
+
+	t.Run("history list", func(t *testing.T) {
+		c := newRequestContext("GET", "/apisix/admin/control/history?limit=2", nil)
+		c.Request.Header.Set("X-API-KEY", "secret")
+		handler.ServeHTTP(context.Background(), c)
+		if got := c.Response.StatusCode(); got != 200 {
+			t.Fatalf("status = %d, want 200", got)
+		}
+		if svc.lastHistoryLimit != 2 {
+			t.Fatalf("history limit = %d, want 2", svc.lastHistoryLimit)
+		}
+		if body := string(c.Response.Body()); !strings.Contains(body, `"total":2`) {
+			t.Fatalf("history list body = %s", body)
+		}
+	})
+
+	t.Run("history rollback", func(t *testing.T) {
+		c := newRequestContext("POST", "/apisix/admin/control/history/h1/rollback", nil)
+		c.Request.Header.Set("X-API-KEY", "secret")
+		handler.ServeHTTP(context.Background(), c)
+		if got := c.Response.StatusCode(); got != 200 {
+			t.Fatalf("status = %d, want 200", got)
+		}
+		if svc.lastRollbackID != "h1" {
+			t.Fatalf("rollback id = %q, want h1", svc.lastRollbackID)
+		}
+		if body := string(c.Response.Body()); !strings.Contains(body, `"history":{"id":"h1"`) {
+			t.Fatalf("history rollback body = %s", body)
+		}
+	})
+}
+
+type fakeService struct {
+	listResult        []controlplane.Envelope
+	listErr           error
+	getResult         controlplane.Envelope
+	getErr            error
+	putResult         controlplane.Envelope
+	putErr            error
+	postResult        controlplane.Envelope
+	postErr           error
+	patchResult       controlplane.Envelope
+	patchErr          error
+	deleteResult      controlplane.DeleteResult
+	deleteErr         error
+	previewResult     controlplane.ApplyPlan
+	previewErr        error
+	applyResult       controlplane.ApplyResult
+	applyErr          error
+	exportResult      controlplane.FileBundle
+	exportErr         error
+	historyResult     controlplane.HistoryEntry
+	historyErr        error
+	historyListResult []controlplane.HistoryEntry
+	historyListErr    error
+	rollbackResult    controlplane.ApplyResult
+	rollbackHistory   controlplane.HistoryEntry
+	rollbackErr       error
+
+	lastKind           controlplane.ResourceKind
+	lastID             string
+	lastBody           json.RawMessage
+	lastPreviewOptions controlplane.PreviewOptions
+	lastApplyOptions   controlplane.ApplyOptions
+	lastExportOptions  controlplane.ExportOptions
+	lastHistorySource  string
+	lastHistoryLimit   int
+	lastRollbackID     string
 }
 
 func (s *fakeService) List(_ context.Context, kind controlplane.ResourceKind) ([]controlplane.Envelope, error) {
@@ -231,12 +388,42 @@ func (s *fakeService) Delete(_ context.Context, kind controlplane.ResourceKind, 
 	return s.deleteResult, s.deleteErr
 }
 
+func (s *fakeService) PreviewBundle(_ context.Context, bundle controlplane.FileBundle, options controlplane.PreviewOptions) (controlplane.ApplyPlan, error) {
+	s.lastPreviewOptions = options
+	return s.previewResult, s.previewErr
+}
+
+func (s *fakeService) ApplyBundle(_ context.Context, bundle controlplane.FileBundle, options controlplane.ApplyOptions) (controlplane.ApplyResult, error) {
+	s.lastApplyOptions = options
+	return s.applyResult, s.applyErr
+}
+
+func (s *fakeService) ExportBundle(_ context.Context, options controlplane.ExportOptions) (controlplane.FileBundle, error) {
+	s.lastExportOptions = options
+	return s.exportResult, s.exportErr
+}
+
+func (s *fakeService) SaveHistorySnapshot(_ context.Context, source string) (controlplane.HistoryEntry, error) {
+	s.lastHistorySource = source
+	return s.historyResult, s.historyErr
+}
+
+func (s *fakeService) ListHistory(_ context.Context, limit int) ([]controlplane.HistoryEntry, error) {
+	s.lastHistoryLimit = limit
+	return s.historyListResult, s.historyListErr
+}
+
+func (s *fakeService) RollbackHistory(_ context.Context, id string) (controlplane.ApplyResult, controlplane.HistoryEntry, error) {
+	s.lastRollbackID = id
+	return s.rollbackResult, s.rollbackHistory, s.rollbackErr
+}
+
 func (s *fakeService) Close() error { return nil }
 
 func newRequestContext(method, path string, body []byte) *app.RequestContext {
 	c := app.NewContext(0)
 	c.Request.SetMethod(method)
-	c.Request.URI().SetPath(path)
+	c.Request.SetRequestURI(path)
 	if body != nil {
 		c.Request.SetBodyRaw(body)
 	}
