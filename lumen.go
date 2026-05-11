@@ -12,18 +12,121 @@ import (
 	"time"
 
 	"github.com/joey/lumen-gateway/internal/adminapi"
+	internalbalancer "github.com/joey/lumen-gateway/internal/balancer"
+	"github.com/joey/lumen-gateway/internal/balancer/roundrobin"
 	"github.com/joey/lumen-gateway/internal/bootstrap"
+	"github.com/joey/lumen-gateway/internal/config"
 	"github.com/joey/lumen-gateway/internal/controlplane"
 	"github.com/joey/lumen-gateway/internal/gateway"
+	internalplugin "github.com/joey/lumen-gateway/internal/plugin"
+	"github.com/joey/lumen-gateway/internal/plugin/builtin"
 	"github.com/joey/lumen-gateway/internal/provider"
+	publicbalancer "github.com/joey/lumen-gateway/balancer"
+	publicplugin "github.com/joey/lumen-gateway/plugin"
 	"github.com/urfave/cli/v2"
 )
 
+// WithPlugins adds one or more plugin registrars that run after the built-in
+// plugins are loaded. Each registrar receives the shared *plugin.Registry and
+// calls plugin.RegisterTypedContext (or r.Register) to add custom plugins.
+//
+// Multiple calls to WithPlugins are cumulative — all registrars run in order.
+//
+// Example:
+//
+//	lumen.Run(lumen.WithPlugins(myplugins.Register))
+//
+// where myplugins.Register has the signature:
+//
+//	func Register(r *plugin.Registry) error
+func WithPlugins(registrars ...func(*publicplugin.Registry) error) Option {
+	return func(o *options) {
+		o.pluginRegs = append(o.pluginRegs, registrars...)
+	}
+}
+
+// WithBalancerType registers a custom load-balancer type identified by kind.
+// The kind string must match the balancer.type field in the upstream config.
+// Multiple calls with different kinds are cumulative.
+//
+// The built-in "round_robin" type is always available as a fallback.
+//
+// Example:
+//
+//	lumen.Run(
+//	    lumen.WithBalancerType("least_conn", leastconn.Factory),
+//	)
+//
+// Factory signature:
+//
+//	func(endpoints []balancer.Endpoint, params any) (balancer.Balancer, error)
+func WithBalancerType(kind string, factory func([]publicbalancer.Endpoint, any) (publicbalancer.Balancer, error)) Option {
+	return func(o *options) {
+		if o.balancerTypes == nil {
+			o.balancerTypes = make(map[string]func([]internalbalancer.Endpoint, any) (internalbalancer.Balancer, error))
+		}
+		o.balancerTypes[kind] = factory
+	}
+}
+
+// WithCompilerOptions passes low-level gateway.CompilerOption values directly
+// to the runtime compiler. Prefer WithPlugins and WithBalancerType for common
+// use-cases; use this only when you need to replace the proxy factory or
+// supply a fully custom registry factory.
+func WithCompilerOptions(opts ...gateway.CompilerOption) Option {
+	return func(o *options) {
+		o.compilerOpts = append(o.compilerOpts, opts...)
+	}
+}
+
+// buildCompilerOpts converts the accumulated plugin registrars and balancer
+// type registrations into gateway.CompilerOption values, appended to any
+// explicitly provided WithCompilerOptions.
+func (o *options) buildCompilerOpts() []gateway.CompilerOption {
+	var extra []gateway.CompilerOption
+
+	if len(o.pluginRegs) > 0 {
+		regs := o.pluginRegs
+		extra = append(extra, gateway.WithRegistryFactory(func() (*internalplugin.Registry, error) {
+			r := internalplugin.NewRegistry()
+			if err := builtin.Register(r); err != nil {
+				return nil, err
+			}
+			for _, reg := range regs {
+				if err := reg(r); err != nil {
+					return nil, fmt.Errorf("plugin registrar failed: %w", err)
+				}
+			}
+			return r, nil
+		}))
+	}
+
+	if len(o.balancerTypes) > 0 {
+		custom := o.balancerTypes
+		extra = append(extra, gateway.WithBalancerFactory(func(opts config.UpstreamOptions, endpoints []internalbalancer.Endpoint) (internalbalancer.Balancer, error) {
+			if factory, ok := custom[opts.Balancer.Type]; ok {
+				return factory(endpoints, opts.Balancer.Params)
+			}
+			switch opts.Balancer.Type {
+			case "", "round_robin":
+				return roundrobin.New(endpoints, opts.Balancer.Params)
+			default:
+				return nil, fmt.Errorf("balancer type %q is not supported", opts.Balancer.Type)
+			}
+		}))
+	}
+
+	return append(extra, o.compilerOpts...)
+}
+
 type options struct {
-	version string
-	build   string
-	flags   []cli.Flag
-	init    func(bootstrap.Options) error
+	version       string
+	build         string
+	flags         []cli.Flag
+	init          func(bootstrap.Options) error
+	compilerOpts  []gateway.CompilerOption
+	pluginRegs    []func(*internalplugin.Registry) error
+	balancerTypes map[string]func([]internalbalancer.Endpoint, any) (internalbalancer.Balancer, error)
 }
 
 type Option func(*options)
@@ -129,7 +232,7 @@ func Run(opts ...Option) error {
 				return err
 			}
 
-			gw, err := gateway.New(initial, adminHandler)
+			gw, err := gateway.NewWithCompiler(initial, gateway.NewRuntimeCompiler(opt.buildCompilerOpts()...), adminHandler)
 			if err != nil {
 				return err
 			}
