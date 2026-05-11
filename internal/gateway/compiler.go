@@ -67,6 +67,13 @@ func WithProxyFactory(factory ProxyFactory) CompilerOption {
 	}
 }
 
+// BuildRegistry builds and returns the plugin registry using the configured
+// registry factory. Useful for inspecting available plugins without performing
+// a full gateway compile — for example, to populate an admin-API catalog.
+func (c *Compiler) BuildRegistry() (*plugin.Registry, error) {
+	return c.registryFactory()
+}
+
 func (c *Compiler) Compile(options config.Options) (*RuntimeSnapshot, error) {
 	registry, err := c.registryFactory()
 	if err != nil {

@@ -232,7 +232,28 @@ func Run(opts ...Option) error {
 				return err
 			}
 
-			gw, err := gateway.NewWithCompiler(initial, gateway.NewRuntimeCompiler(opt.buildCompilerOpts()...), adminHandler)
+			compiler := gateway.NewRuntimeCompiler(opt.buildCompilerOpts()...)
+			if adminHandler != nil {
+				if registry, regErr := compiler.BuildRegistry(); regErr == nil {
+					defs := registry.Definitions()
+					catalog := make([]adminapi.PluginCatalogEntry, 0, len(defs))
+					for _, def := range defs {
+						scopes := make([]string, len(def.Metadata().Scopes))
+						for i, s := range def.Metadata().Scopes {
+							scopes[i] = string(s)
+						}
+						catalog = append(catalog, adminapi.PluginCatalogEntry{
+							Name:   def.Metadata().Name,
+							Scopes: scopes,
+						})
+					}
+					adminHandler.SetPluginCatalog(catalog)
+				} else {
+					slog.Warn("failed to build plugin registry for catalog", "error", regErr)
+				}
+			}
+
+			gw, err := gateway.NewWithCompiler(initial, compiler, adminHandler)
 			if err != nil {
 				return err
 			}

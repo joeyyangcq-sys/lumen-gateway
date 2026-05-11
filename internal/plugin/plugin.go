@@ -97,6 +97,17 @@ func (r *Registry) Factory(name string) Factory {
 	return definition.Factory()
 }
 
+// Definitions returns all registered plugin definitions. The order is
+// non-deterministic (map iteration). Callers that need a stable order should
+// sort by Name after calling this method.
+func (r *Registry) Definitions() []Definition {
+	defs := make([]Definition, 0, len(r.definitions))
+	for _, def := range r.definitions {
+		defs = append(defs, def)
+	}
+	return defs
+}
+
 func AllScopes() []Scope {
 	return []Scope{
 		ScopeGlobal,

@@ -36,9 +36,27 @@ type service interface {
 	Close() error
 }
 
+// PluginCatalogEntry describes a single plugin registered in the gateway.
+// It is returned by GET /apisix/admin/control/plugins so the admin UI can
+// present a selectable list instead of asking users to type plugin names.
+type PluginCatalogEntry struct {
+	Name   string   `json:"name"`
+	Scopes []string `json:"scopes"`
+}
+
 type Handler struct {
-	service  service
-	adminKey string
+	service       service
+	adminKey      string
+	pluginCatalog []PluginCatalogEntry
+}
+
+// SetPluginCatalog stores the list of registered plugins so the admin API
+// can return them at GET /apisix/admin/control/plugins.
+func (h *Handler) SetPluginCatalog(catalog []PluginCatalogEntry) {
+	if h == nil {
+		return
+	}
+	h.pluginCatalog = catalog
 }
 
 func New(boot bootstrap.Options) (*Handler, error) {
@@ -78,6 +96,16 @@ func (h *Handler) ServeHTTP(ctx context.Context, c *app.RequestContext) bool {
 		return false
 	}
 	pathValue := string(c.Path())
+	isAdminPath := strings.HasPrefix(pathValue, routePrefix) || strings.HasPrefix(pathValue, controlPrefix)
+
+	// Handle CORS preflight: OPTIONS must succeed without auth so the browser
+	// will proceed with the actual request carrying X-API-KEY.
+	if string(c.Method()) == http.MethodOptions && isAdminPath {
+		setCORSHeaders(c)
+		c.Response.SetStatusCode(http.StatusNoContent)
+		return true
+	}
+
 	if strings.HasPrefix(pathValue, controlPrefix) {
 		if !h.authorized(c) {
 			writeControlError(c, http.StatusUnauthorized, "unauthorized", "missing or invalid X-API-KEY", nil)
@@ -191,6 +219,8 @@ func (h *Handler) handleControl(ctx context.Context, c *app.RequestContext, path
 		h.handleHistoryList(ctx, c)
 	case strings.HasPrefix(trimmed, "history/") && strings.HasSuffix(trimmed, "/rollback") && string(c.Method()) == http.MethodPost:
 		h.handleHistoryRollback(ctx, c, trimmed)
+	case trimmed == "plugins" && string(c.Method()) == http.MethodGet:
+		h.handlePluginCatalog(c)
 	default:
 		writeControlError(c, http.StatusNotFound, "not_found", "unsupported control path", nil)
 	}
@@ -237,6 +267,15 @@ func (h *Handler) handleValidate(ctx context.Context, c *app.RequestContext) {
 		return
 	}
 	writeJSON(c, http.StatusOK, result)
+}
+
+func (h *Handler) handlePluginCatalog(c *app.RequestContext) {
+	setCORSHeaders(c)
+	catalog := h.pluginCatalog
+	if catalog == nil {
+		catalog = []PluginCatalogEntry{}
+	}
+	writeJSON(c, http.StatusOK, catalog)
 }
 
 func (h *Handler) handleImportPreview(ctx context.Context, c *app.RequestContext) {
@@ -371,6 +410,13 @@ func (h *Handler) handleHistoryRollback(ctx context.Context, c *app.RequestConte
 	})
 }
 
+func setCORSHeaders(c *app.RequestContext) {
+	c.Response.Header.Set("Access-Control-Allow-Origin", "*")
+	c.Response.Header.Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+	c.Response.Header.Set("Access-Control-Allow-Headers", "Content-Type, X-API-KEY")
+	c.Response.Header.Set("Access-Control-Max-Age", "86400")
+}
+
 func (h *Handler) authorized(c *app.RequestContext) bool {
 	if h.adminKey == "" {
 		return false
@@ -418,6 +464,13 @@ func (h *Handler) handlePut(ctx context.Context, c *app.RequestContext, kind con
 		writeError(c, http.StatusBadRequest, "resource id is required")
 		return
 	}
+	body := c.Request.Body()
+
+	// Validate cross-references before writing to etcd.
+	if stop := h.validateBeforeWrite(ctx, c, kind, id, body); stop {
+		return
+	}
+
 	status := http.StatusOK
 	if _, err := h.service.Get(ctx, kind, id); err != nil {
 		if errors.Is(err, controlplane.ErrNotFound) {
@@ -427,7 +480,7 @@ func (h *Handler) handlePut(ctx context.Context, c *app.RequestContext, kind con
 			return
 		}
 	}
-	item, err := h.service.Put(ctx, kind, id, c.Request.Body())
+	item, err := h.service.Put(ctx, kind, id, body)
 	if err != nil {
 		writeMappedError(c, err)
 		return
@@ -436,12 +489,51 @@ func (h *Handler) handlePut(ctx context.Context, c *app.RequestContext, kind con
 }
 
 func (h *Handler) handlePost(ctx context.Context, c *app.RequestContext, kind controlplane.ResourceKind) {
-	item, err := h.service.Post(ctx, kind, c.Request.Body())
+	body := c.Request.Body()
+	id, _ := controlplane.ExtractResourceID(body)
+
+	// Validate cross-references before writing to etcd.
+	if stop := h.validateBeforeWrite(ctx, c, kind, id, body); stop {
+		return
+	}
+
+	item, err := h.service.Post(ctx, kind, body)
 	if err != nil {
 		writeMappedError(c, err)
 		return
 	}
 	writeJSON(c, http.StatusCreated, item)
+}
+
+// validateBeforeWrite runs ValidateResource and writes a 422 with a human-readable
+// Chinese error message if the resource is invalid. Returns true if the handler
+// should stop (i.e. we already wrote an error response).
+func (h *Handler) validateBeforeWrite(
+	ctx context.Context,
+	c *app.RequestContext,
+	kind controlplane.ResourceKind,
+	id string,
+	body []byte,
+) bool {
+	result, err := h.service.ValidateResource(ctx, kind, id, body)
+	if err != nil {
+		// Validation infrastructure failed (e.g. etcd unreachable) — let the
+		// write proceed so we don't block users when etcd is temporarily slow.
+		return false
+	}
+	if result.Valid {
+		return false
+	}
+
+	msg := "配置验证失败"
+	if len(result.Issues) > 0 {
+		msg = result.Issues[0].Message
+	}
+	writeJSON(c, http.StatusUnprocessableEntity, map[string]any{
+		"error_msg":  msg,
+		"validation": result,
+	})
+	return true
 }
 
 func (h *Handler) handlePatch(ctx context.Context, c *app.RequestContext, kind controlplane.ResourceKind, id string) {
@@ -646,6 +738,7 @@ func writeAPISIXBody(c *app.RequestContext, status int, payload any) {
 		writeError(c, http.StatusInternalServerError, err.Error())
 		return
 	}
+	setCORSHeaders(c)
 	c.Response.Header.Set("Content-Type", "application/json")
 	c.Response.SetStatusCode(status)
 	c.Response.SetBodyRaw(body)
