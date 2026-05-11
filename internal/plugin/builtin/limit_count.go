@@ -110,7 +110,7 @@ func registerLimitCount(registry *plugin.Registry) error {
 
 			if !allowed {
 				if showHeaders {
-					setLimitCountHeaders(pc, cfg.Count, 0, reset)
+					setLimitCountHeaders(pc, cfg.Count, 0, reset, cfg.TimeWindow, derivedKey)
 				}
 				pc.SetResponseStatus(rejectedCode)
 				if cfg.RejectedMsg != "" {
@@ -122,7 +122,7 @@ func registerLimitCount(registry *plugin.Registry) error {
 
 			pc.Next(ctx)
 			if showHeaders {
-				setLimitCountHeaders(pc, cfg.Count, remaining, reset)
+				setLimitCountHeaders(pc, cfg.Count, remaining, reset, cfg.TimeWindow, derivedKey)
 			}
 		}, nil
 	})
@@ -141,8 +141,10 @@ func deriveLimitCountKey(pc plugin.PluginContext, keyType, key string) string {
 	}
 }
 
-func setLimitCountHeaders(pc plugin.PluginContext, limit, remaining, reset int) {
+func setLimitCountHeaders(pc plugin.PluginContext, limit, remaining, reset, window int, key string) {
 	pc.SetResponseHeader("X-RateLimit-Limit", fmt.Sprintf("%d", limit))
 	pc.SetResponseHeader("X-RateLimit-Remaining", fmt.Sprintf("%d", remaining))
-	pc.SetResponseHeader("X-RateLimit-Reset", fmt.Sprintf("%d", reset))
+	pc.SetResponseHeader("X-RateLimit-Reset", fmt.Sprintf("%d", reset))   // seconds until window resets
+	pc.SetResponseHeader("X-RateLimit-Window", fmt.Sprintf("%d", window)) // total window size in seconds
+	pc.SetResponseHeader("X-RateLimit-Key", key)                          // actual key used for this counter
 }
