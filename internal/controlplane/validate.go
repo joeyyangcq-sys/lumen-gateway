@@ -4,12 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"regexp"
 	"slices"
-	"strings"
 
 	"github.com/joey/lumen-gateway/internal/apisix"
-	"github.com/joey/lumen-gateway/internal/translate"
 )
 
 type ValidationIssue struct {
@@ -207,77 +204,121 @@ func snapshotResourceIDs(snapshot apisix.Snapshot, kind ResourceKind) []string {
 	}
 }
 
-func validateSnapshot(snapshot apisix.Snapshot, fallbackKind ResourceKind, fallbackID string) (ValidationResult, error) {
-	_, err := translate.ApisixSnapshotToConfig(snapshot, translate.ApisixToConfigOptions{
-		Listen: ":18080",
-	})
-	if err == nil {
-		return ValidationResult{Valid: true}, nil
+// validateSnapshot checks the snapshot for structural integrity (cross-references,
+// required fields) and returns actionable, human-readable issues.
+// It does NOT rely on the translate layer so that gateway-reload resilience
+// (lenient translator) and write-time validation (strict) stay independent.
+func validateSnapshot(snapshot apisix.Snapshot, targetKind ResourceKind, targetID string) (ValidationResult, error) {
+	var issues []ValidationIssue
+
+	// ── Upstreams ─────────────────────────────────────────────────────────────
+	for id, up := range snapshot.Upstreams {
+		if len(up.Nodes) == 0 {
+			issues = append(issues, ValidationIssue{
+				Resource:   string(KindUpstream),
+				ResourceID: id,
+				Field:      "nodes",
+				Message:    "上游节点列表不能为空，请至少添加一个后端节点（host:port）",
+			})
+		}
 	}
 
-	issue := inferValidationIssue(err, fallbackKind, fallbackID)
-	return ValidationResult{
-		Valid:  false,
-		Issues: []ValidationIssue{issue},
-	}, nil
+	// ── Services ──────────────────────────────────────────────────────────────
+	for id, svc := range snapshot.Services {
+		upstreamID := string(svc.UpstreamID)
+		if upstreamID == "" && svc.Upstream == nil {
+			issues = append(issues, ValidationIssue{
+				Resource:   string(KindService),
+				ResourceID: id,
+				Field:      "upstream_id",
+				Message:    "服务缺少 upstream_id，请先创建上游，再在服务中选择关联上游",
+			})
+			continue
+		}
+		if upstreamID != "" {
+			if _, ok := snapshot.Upstreams[upstreamID]; !ok {
+				issues = append(issues, ValidationIssue{
+					Resource:   string(KindService),
+					ResourceID: id,
+					Field:      "upstream_id",
+					Message:    fmt.Sprintf("服务引用的上游 %q 不存在，请先创建该上游再保存服务", upstreamID),
+				})
+			}
+		}
+	}
+
+	// ── Routes ────────────────────────────────────────────────────────────────
+	for id, route := range snapshot.Routes {
+		if string(route.URI) == "" && len(route.URIs) == 0 {
+			issues = append(issues, ValidationIssue{
+				Resource:   string(KindRoute),
+				ResourceID: id,
+				Field:      "uri",
+				Message:    "路由缺少请求路径，请填写 uri 字段（如 /api/v1/* 或 /example）",
+			})
+			continue
+		}
+
+		serviceID := string(route.ServiceID)
+		upstreamID := string(route.UpstreamID)
+
+		if serviceID == "" && upstreamID == "" && route.Upstream == nil {
+			issues = append(issues, ValidationIssue{
+				Resource:   string(KindRoute),
+				ResourceID: id,
+				Field:      "service_id",
+				Message:    "路由缺少关联服务，请先创建服务，再在路由的「关联服务」中选择",
+			})
+			continue
+		}
+		if serviceID != "" {
+			if _, ok := snapshot.Services[serviceID]; !ok {
+				issues = append(issues, ValidationIssue{
+					Resource:   string(KindRoute),
+					ResourceID: id,
+					Field:      "service_id",
+					Message:    fmt.Sprintf("路由引用的服务 %q 不存在，请先创建该服务再保存路由", serviceID),
+				})
+			}
+		}
+		if upstreamID != "" {
+			if _, ok := snapshot.Upstreams[upstreamID]; !ok {
+				issues = append(issues, ValidationIssue{
+					Resource:   string(KindRoute),
+					ResourceID: id,
+					Field:      "upstream_id",
+					Message:    fmt.Sprintf("路由引用的上游 %q 不存在，请先创建该上游再保存路由", upstreamID),
+				})
+			}
+		}
+	}
+
+	// Filter issues relevant to the target resource first, for better UX.
+	primary := filterIssues(issues, targetKind, targetID)
+	if len(primary) > 0 {
+		return ValidationResult{Valid: false, Issues: primary}, nil
+	}
+	if len(issues) > 0 {
+		return ValidationResult{Valid: false, Issues: issues}, nil
+	}
+	return ValidationResult{Valid: true}, nil
 }
 
-var resourcePrefixPattern = regexp.MustCompile(`^(route|service|upstream|plugin_config|global rule) "([^"]+)": (.+)$`)
-
-func inferValidationIssue(err error, fallbackKind ResourceKind, fallbackID string) ValidationIssue {
-	message := err.Error()
-	issue := ValidationIssue{
-		Resource:   string(fallbackKind),
-		ResourceID: fallbackID,
-		Message:    message,
+// filterIssues returns only the issues that match the given resource kind + id.
+// Falls back to all issues if none match.
+func filterIssues(issues []ValidationIssue, kind ResourceKind, id string) []ValidationIssue {
+	if kind == "" {
+		return nil
 	}
-
-	if match := resourcePrefixPattern.FindStringSubmatch(message); len(match) == 4 {
-		issue.Resource = mapErrorResource(match[1])
-		issue.ResourceID = match[2]
-		issue.Message = match[3]
+	var out []ValidationIssue
+	for _, issue := range issues {
+		if issue.Resource == string(kind) && (id == "" || issue.ResourceID == id) {
+			out = append(out, issue)
+		}
 	}
-
-	lower := strings.ToLower(issue.Message)
-	switch {
-	case strings.Contains(lower, "uri/uris"):
-		issue.Field = "uri"
-	case strings.Contains(lower, "references unknown service"):
-		issue.Field = "service_id"
-	case strings.Contains(lower, "missing upstream_id/upstream"):
-		issue.Field = "upstream_id"
-	case strings.Contains(lower, "references unknown upstream"):
-		issue.Field = "upstream_id"
-	case strings.Contains(lower, "plugin_config"):
-		issue.Field = "plugin_config_id"
-	case strings.Contains(lower, "nodes"):
-		issue.Field = "nodes"
-	case strings.Contains(lower, "pass_host"):
-		issue.Field = "pass_host"
-	case strings.Contains(lower, "upstream_host"):
-		issue.Field = "upstream_host"
-	case strings.Contains(lower, "plugins"):
-		issue.Field = "plugins"
-	}
-	return issue
+	return out
 }
 
-func mapErrorResource(label string) string {
-	switch label {
-	case "route":
-		return string(KindRoute)
-	case "service":
-		return string(KindService)
-	case "upstream":
-		return string(KindUpstream)
-	case "plugin_config":
-		return string(KindPluginConfig)
-	case "global rule":
-		return string(KindGlobalRule)
-	default:
-		return label
-	}
-}
 
 func sortedMapKeys[T any](items map[string]T) []string {
 	keys := make([]string, 0, len(items))

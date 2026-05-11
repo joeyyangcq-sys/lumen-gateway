@@ -57,11 +57,29 @@ type Snapshot struct {
 	UpstreamDurations map[string]histogramSnapshot
 }
 
+// GatewayStats is a pre-computed summary derived from the current snapshot.
+// Intended for the admin-UI overview — no Prometheus client required.
+type GatewayStats struct {
+	RequestsTotal uint64       `json:"requests_total"`
+	Errors4xx     uint64       `json:"errors_4xx"`
+	Errors5xx     uint64       `json:"errors_5xx"`
+	ErrorRate     float64      `json:"error_rate"` // 0–100 percent
+	TopRoutes     []RouteStats `json:"top_routes"`
+}
+
+// RouteStats is per-route request and error counts.
+type RouteStats struct {
+	RouteID  string `json:"route_id"`
+	Requests uint64 `json:"requests"`
+	Errors   uint64 `json:"errors"`
+}
+
 type Recorder interface {
 	ObservePlugin(PluginLabels, time.Duration)
 	ObserveUpstream(UpstreamLabels, ProxyInfo)
 	RenderPrometheus() string
 	Snapshot() Snapshot
+	Stats() GatewayStats
 	Reset()
 }
 
@@ -190,6 +208,70 @@ func (r *MemoryRecorder) Snapshot() Snapshot {
 		PluginDurations:   cloneHistogramMap(r.pluginDurations),
 		UpstreamRequests:  cloneCounterMap(r.upstreamRequests),
 		UpstreamDurations: cloneHistogramMap(r.upstreamDurations),
+	}
+}
+
+func (r *MemoryRecorder) Stats() GatewayStats {
+	snap := r.Snapshot()
+
+	routeTotals := make(map[string]uint64)
+	routeErrors := make(map[string]uint64)
+
+	var total, e4xx, e5xx uint64
+	for key, count := range snap.UpstreamRequests {
+		labels := parseLabelKey(key)
+		total += count
+
+		class := labels["status_class"]
+		switch {
+		case len(class) > 0 && class[0] == '4':
+			e4xx += count
+		case len(class) > 0 && class[0] == '5':
+			e5xx += count
+		}
+
+		rid := labels["route_id"]
+		if rid != "" {
+			routeTotals[rid] += count
+			if len(class) > 0 && (class[0] == '4' || class[0] == '5') {
+				routeErrors[rid] += count
+			}
+		}
+	}
+
+	var errorRate float64
+	if total > 0 {
+		errorRate = float64(e4xx+e5xx) / float64(total) * 100
+	}
+
+	// top-5 routes by request volume
+	type routeEntry struct {
+		id   string
+		reqs uint64
+	}
+	entries := make([]routeEntry, 0, len(routeTotals))
+	for id, reqs := range routeTotals {
+		entries = append(entries, routeEntry{id: id, reqs: reqs})
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].reqs > entries[j].reqs })
+	if len(entries) > 5 {
+		entries = entries[:5]
+	}
+	topRoutes := make([]RouteStats, len(entries))
+	for i, e := range entries {
+		topRoutes[i] = RouteStats{
+			RouteID:  e.id,
+			Requests: e.reqs,
+			Errors:   routeErrors[e.id],
+		}
+	}
+
+	return GatewayStats{
+		RequestsTotal: total,
+		Errors4xx:     e4xx,
+		Errors5xx:     e5xx,
+		ErrorRate:     errorRate,
+		TopRoutes:     topRoutes,
 	}
 }
 

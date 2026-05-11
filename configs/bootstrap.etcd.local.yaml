@@ -1,0 +1,9 @@
+gateway:
+  listen: ":18080"
+  source: etcd_apisix
+
+etcd:
+  endpoints:
+    - "127.0.0.1:2379"
+  prefix: "/apisix"
+  dial_timeout: 3s

@@ -4,6 +4,8 @@ coverage.out
 *.test
 *.log
 .DS_Store
+# compiled binary
+lumen-gateway
 
 # local execution notes / plans
 ETCD_APISIX_EXECUTION_PLAN.md

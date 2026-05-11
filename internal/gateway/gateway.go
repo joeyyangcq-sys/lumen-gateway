@@ -295,10 +295,12 @@ func buildPluginHandlers(
 		}
 		definition, ok := registry.Definition(name)
 		if !ok {
-			return nil, fmt.Errorf("plugin %q is not registered", name)
+			slog.Warn("skipping unregistered plugin", "name", name, "scope", scope)
+			continue
 		}
 		if !definition.Supports(scope) {
-			return nil, fmt.Errorf("plugin %q does not support %s scope", name, scope)
+			slog.Warn("skipping plugin: unsupported scope", "name", name, "scope", scope)
+			continue
 		}
 		handler, err := definition.Factory()(params)
 		if err != nil {

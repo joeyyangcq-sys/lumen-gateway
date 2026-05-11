@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 	"time"
@@ -43,7 +44,14 @@ func ApisixSnapshotToConfig(s apisix.Snapshot, opts ApisixToConfigOptions) (conf
 	for id, upstream := range s.Upstreams {
 		up, err := apisixUpstreamToConfig(upstream)
 		if err != nil {
-			return config.Options{}, fmt.Errorf("upstream %q: %w", id, err)
+			slog.Warn("skipping upstream: translation failed", "id", id, "error", err)
+			continue
+		}
+		switch up.Scheme {
+		case "", "http", "https":
+		default:
+			slog.Warn("skipping upstream: unsupported scheme", "id", id, "scheme", up.Scheme)
+			continue
 		}
 		out.Upstreams[id] = up
 	}
@@ -51,7 +59,13 @@ func ApisixSnapshotToConfig(s apisix.Snapshot, opts ApisixToConfigOptions) (conf
 	for id, service := range s.Services {
 		svc, err := apisixServiceToConfig(service, s.PluginConfig, out.Upstreams)
 		if err != nil {
-			return config.Options{}, fmt.Errorf("service %q: %w", id, err)
+			slog.Warn("skipping service: translation failed", "id", id, "error", err)
+			continue
+		}
+		// Verify the upstream reference exists.
+		if _, ok := out.Upstreams[svc.Upstream]; !ok {
+			slog.Warn("skipping service: referenced upstream not found", "id", id, "upstream_id", svc.Upstream)
+			continue
 		}
 		out.Services[id] = svc
 	}
@@ -59,14 +73,24 @@ func ApisixSnapshotToConfig(s apisix.Snapshot, opts ApisixToConfigOptions) (conf
 	for id, route := range s.Routes {
 		rt, err := apisixRouteToConfig(route, s.PluginConfig)
 		if err != nil {
-			return config.Options{}, fmt.Errorf("route %q: %w", id, err)
+			slog.Warn("skipping route: translation failed", "id", id, "error", err)
+			continue
 		}
 
 		// Resolve service reference.
 		if route.ServiceID != "" {
-			rt.Service = route.ServiceID.String()
+			serviceID := route.ServiceID.String()
+			if _, ok := out.Services[serviceID]; !ok {
+				slog.Warn("skipping route: referenced service not found", "id", id, "service_id", serviceID)
+				continue
+			}
+			rt.Service = serviceID
 		} else if route.UpstreamID != "" {
 			upstreamID := route.UpstreamID.String()
+			if _, ok := out.Upstreams[upstreamID]; !ok {
+				slog.Warn("skipping route: referenced upstream not found", "id", id, "upstream_id", upstreamID)
+				continue
+			}
 			serviceID := "service-" + upstreamID
 			if _, ok := out.Services[serviceID]; !ok {
 				upstream := out.Upstreams[upstreamID]
@@ -82,7 +106,8 @@ func ApisixSnapshotToConfig(s apisix.Snapshot, opts ApisixToConfigOptions) (conf
 			upstreamID := "upstream-route-" + id
 			up, err := apisixUpstreamToConfig(*route.Upstream)
 			if err != nil {
-				return config.Options{}, fmt.Errorf("route %q inline upstream: %w", id, err)
+				slog.Warn("skipping route: inline upstream translation failed", "id", id, "error", err)
+				continue
 			}
 			up.ID = upstreamID
 			out.Upstreams[upstreamID] = up
@@ -94,6 +119,9 @@ func ApisixSnapshotToConfig(s apisix.Snapshot, opts ApisixToConfigOptions) (conf
 				Timeout:  up.Timeout,
 			}
 			rt.Service = serviceID
+		} else {
+			slog.Warn("skipping route: no service_id, upstream_id, or inline upstream", "id", id)
+			continue
 		}
 
 		out.Routes[id] = rt
@@ -279,19 +307,23 @@ func normalizeApisixURI(uri string) string {
 	if uri == "" {
 		return uri
 	}
+
+	// Pass through Lumen-native path formats so the form can store them directly.
+	//   "= /exact"  → exact match
+	//   "~ regex"   → case-sensitive regex
+	//   "~* regex"  → case-insensitive regex
+	if strings.HasPrefix(uri, "= ") || strings.HasPrefix(uri, "~ ") || strings.HasPrefix(uri, "~*") {
+		return uri
+	}
+
 	if !strings.HasPrefix(uri, "/") {
 		uri = "/" + uri
 	}
 
-	// Lumen's router supports:
-	// - "= /exact" exact match
-	// - plain prefix match (strings.HasPrefix)
-	// - "~<regex>" regex match (added as part of skeleton)
-	//
-	// Map APISIX wildcard forms into a regex-like syntax:
-	// - "/foo/*" => "/foo/" (prefix)
-	// - "/foo*"  => "/foo"  (prefix)
-	// - anything with "*" in the middle stays as-is and will be handled by regex matching later.
+	// Map APISIX wildcard forms into Lumen prefix/regex syntax:
+	//   "/foo/*"  → "/foo/" (prefix)
+	//   "/foo*"   → "/foo"  (prefix)
+	//   "*" mid-path → regex
 	if strings.Contains(uri, "*") {
 		if strings.HasSuffix(uri, "/*") {
 			return strings.TrimSuffix(uri, "*")
@@ -302,7 +334,7 @@ func normalizeApisixURI(uri string) string {
 		return "~ " + apisixWildcardToRegex(uri)
 	}
 
-	// Default to exact match for APISIX full path match semantics.
+	// Default to exact match for APISIX full-path match semantics.
 	return "= " + uri
 }
 
@@ -443,7 +475,17 @@ func translateApisixPlugin(name string, raw json.RawMessage) ([]config.PluginRef
 	case "limit-count":
 		return translateLimitCount(raw)
 	default:
-		return nil, nil
+		// Pass through as a Lumen-native plugin ref.
+		// This allows storing plugins by their internal name (e.g. strip_prefix,
+		// add_prefix, request_transformer) directly in the APISIX resource JSON
+		// without requiring an APISIX-compatible wrapper.
+		params := make(map[string]any)
+		if len(raw) > 0 && string(raw) != "null" {
+			if err := json.Unmarshal(raw, &params); err != nil {
+				return nil, fmt.Errorf("decode plugin %q params: %w", name, err)
+			}
+		}
+		return []config.PluginRef{{Name: name, Params: params}}, nil
 	}
 }
 

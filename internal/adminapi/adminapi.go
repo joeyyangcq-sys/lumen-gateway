@@ -13,6 +13,7 @@ import (
 
 	"github.com/joey/lumen-gateway/internal/bootstrap"
 	"github.com/joey/lumen-gateway/internal/controlplane"
+	"github.com/joey/lumen-gateway/internal/observability"
 )
 
 const routePrefix = "/apisix/admin/"
@@ -221,6 +222,8 @@ func (h *Handler) handleControl(ctx context.Context, c *app.RequestContext, path
 		h.handleHistoryRollback(ctx, c, trimmed)
 	case trimmed == "plugins" && string(c.Method()) == http.MethodGet:
 		h.handlePluginCatalog(c)
+	case trimmed == "stats" && string(c.Method()) == http.MethodGet:
+		h.handleStats(c)
 	default:
 		writeControlError(c, http.StatusNotFound, "not_found", "unsupported control path", nil)
 	}
@@ -267,6 +270,11 @@ func (h *Handler) handleValidate(ctx context.Context, c *app.RequestContext) {
 		return
 	}
 	writeJSON(c, http.StatusOK, result)
+}
+
+func (h *Handler) handleStats(c *app.RequestContext) {
+	setCORSHeaders(c)
+	writeJSON(c, http.StatusOK, observability.Default().Stats())
 }
 
 func (h *Handler) handlePluginCatalog(c *app.RequestContext) {
