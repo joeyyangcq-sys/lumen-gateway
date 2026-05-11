@@ -180,6 +180,192 @@
         "expr": "histogram_quantile(0.95, sum by(le, plugin) (rate(lumen_plugin_duration_seconds_bucket[5m])))",
         "legendFormat": "p95 {{ plugin }}", "refId": "A"
       }]
+    },
+    {
+      "id": 11,
+      "type": "row",
+      "title": "System Runtime",
+      "gridPos": { "x": 0, "y": 28, "w": 24, "h": 1 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Goroutine Count",
+      "gridPos": { "x": 0, "y": 29, "w": 8, "h": 8 },
+      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "list", "placement": "bottom" } },
+      "fieldConfig": {
+        "defaults": { "unit": "short", "custom": { "lineWidth": 2, "fillOpacity": 10 } }
+      },
+      "targets": [{
+        "datasource": { "uid": "prometheus" },
+        "expr": "go_goroutines",
+        "legendFormat": "goroutines",
+        "refId": "A"
+      }]
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Memory Usage",
+      "gridPos": { "x": 8, "y": 29, "w": 8, "h": 8 },
+      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "list", "placement": "bottom" } },
+      "fieldConfig": {
+        "defaults": { "unit": "bytes", "custom": { "lineWidth": 2, "fillOpacity": 10 } }
+      },
+      "targets": [
+        {
+          "datasource": { "uid": "prometheus" },
+          "expr": "go_memstats_heap_alloc_bytes",
+          "legendFormat": "heap alloc",
+          "refId": "A"
+        },
+        {
+          "datasource": { "uid": "prometheus" },
+          "expr": "go_memstats_sys_bytes",
+          "legendFormat": "sys",
+          "refId": "B"
+        },
+        {
+          "datasource": { "uid": "prometheus" },
+          "expr": "go_memstats_stack_inuse_bytes",
+          "legendFormat": "stack inuse",
+          "refId": "C"
+        }
+      ]
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "GC Duration",
+      "gridPos": { "x": 16, "y": 29, "w": 8, "h": 8 },
+      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "list", "placement": "bottom" } },
+      "fieldConfig": {
+        "defaults": { "unit": "s", "custom": { "lineWidth": 2, "fillOpacity": 5 } }
+      },
+      "targets": [
+        {
+          "datasource": { "uid": "prometheus" },
+          "expr": "go_gc_duration_seconds{quantile=\"0.75\"}",
+          "legendFormat": "gc p75",
+          "refId": "A"
+        },
+        {
+          "datasource": { "uid": "prometheus" },
+          "expr": "go_gc_duration_seconds{quantile=\"1.0\"}",
+          "legendFormat": "gc max",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 15,
+      "type": "row",
+      "title": "Connections & Traffic",
+      "gridPos": { "x": 0, "y": 37, "w": 24, "h": 1 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 16,
+      "type": "timeseries",
+      "title": "Open Connections",
+      "gridPos": { "x": 0, "y": 38, "w": 8, "h": 8 },
+      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "list", "placement": "bottom" } },
+      "fieldConfig": {
+        "defaults": { "unit": "short", "custom": { "lineWidth": 2, "fillOpacity": 10 } }
+      },
+      "targets": [{
+        "datasource": { "uid": "prometheus" },
+        "expr": "sum by(server_id) (http_server_open_connections)",
+        "legendFormat": "{{ server_id }}",
+        "refId": "A"
+      }]
+    },
+    {
+      "id": 17,
+      "type": "timeseries",
+      "title": "Active Requests",
+      "gridPos": { "x": 8, "y": 38, "w": 8, "h": 8 },
+      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "list", "placement": "bottom" } },
+      "fieldConfig": {
+        "defaults": { "unit": "short", "custom": { "lineWidth": 2, "fillOpacity": 10 } }
+      },
+      "targets": [{
+        "datasource": { "uid": "prometheus" },
+        "expr": "http_server_active_requests",
+        "legendFormat": "active",
+        "refId": "A"
+      }]
+    },
+    {
+      "id": 18,
+      "type": "timeseries",
+      "title": "Traffic In/Out",
+      "gridPos": { "x": 16, "y": 38, "w": 8, "h": 8 },
+      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "list", "placement": "bottom" } },
+      "fieldConfig": {
+        "defaults": { "unit": "Bps", "custom": { "lineWidth": 2, "fillOpacity": 10 } }
+      },
+      "targets": [
+        {
+          "datasource": { "uid": "prometheus" },
+          "expr": "sum(rate(http_server_request_body_size_total[1m]))",
+          "legendFormat": "in",
+          "refId": "A"
+        },
+        {
+          "datasource": { "uid": "prometheus" },
+          "expr": "sum(rate(http_server_response_body_size_total[1m]))",
+          "legendFormat": "out",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 19,
+      "type": "row",
+      "title": "Rate Limiting",
+      "gridPos": { "x": 0, "y": 46, "w": 24, "h": 1 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 20,
+      "type": "timeseries",
+      "title": "Rate Limit Decisions",
+      "gridPos": { "x": 0, "y": 47, "w": 12, "h": 8 },
+      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "list", "placement": "bottom" } },
+      "fieldConfig": {
+        "defaults": { "unit": "reqps", "custom": { "lineWidth": 2, "fillOpacity": 10 } },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "rejected" }, "properties": [{ "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "allowed" }, "properties": [{ "id": "color", "value": { "fixedColor": "green", "mode": "fixed" } }] }
+        ]
+      },
+      "targets": [{
+        "datasource": { "uid": "prometheus" },
+        "expr": "sum by(decision) (rate(http_ratelimit_requests_total[1m]))",
+        "legendFormat": "{{ decision }}",
+        "refId": "A"
+      }]
+    },
+    {
+      "id": 21,
+      "type": "stat",
+      "title": "Rate Limit Rejection Rate",
+      "gridPos": { "x": 12, "y": 47, "w": 12, "h": 8 },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "area" },
+      "fieldConfig": {
+        "defaults": { "unit": "percent", "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 5 }, { "color": "red", "value": 20 }] } }
+      },
+      "targets": [{
+        "datasource": { "uid": "prometheus" },
+        "expr": "100 * sum(rate(http_ratelimit_requests_total{decision=\"rejected\"}[1m])) / (sum(rate(http_ratelimit_requests_total[1m])) + 0.0001)",
+        "legendFormat": "rejection %",
+        "refId": "A"
+      }]
     }
   ]
 }

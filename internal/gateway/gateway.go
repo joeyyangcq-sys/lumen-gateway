@@ -1,11 +1,13 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"slices"
 	"sync/atomic"
 	"time"
@@ -18,6 +20,7 @@ import (
 	"github.com/joey/lumen-gateway/internal/plugin"
 	"github.com/joey/lumen-gateway/internal/proxy"
 	"github.com/joey/lumen-gateway/internal/router"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 type Gateway struct {
@@ -110,6 +113,11 @@ func NewWithCompiler(options config.Options, compiler RuntimeCompiler, adminHand
 	}
 	gw.snapshot.Store(snapshot)
 
+	// Health check endpoint — used by Docker and load balancers.
+	h.GET("/health", func(_ context.Context, c *app.RequestContext) {
+		c.Response.SetStatusCode(200)
+		c.Response.SetBodyRaw([]byte("ok"))
+	})
 	h.Any("/*path", gw.ServeHTTP)
 	return gw, nil
 }
@@ -147,7 +155,9 @@ func (g *Gateway) ServeHTTP(ctx context.Context, c *app.RequestContext) {
 	if string(c.Path()) == "/metrics" {
 		c.Response.Header.Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 		c.Response.SetStatusCode(200)
-		c.Response.SetBodyString(observability.Default().RenderPrometheus())
+		lumenMetrics := observability.Default().RenderPrometheus()
+		stdMetrics := collectStdPromMetrics()
+		c.Response.SetBodyString(lumenMetrics + stdMetrics)
 		return
 	}
 
@@ -363,3 +373,21 @@ func wrapObservedPluginHandler(name string, scope plugin.Scope, next app.Handler
 		}, time.Since(start))
 	}
 }
+
+func collectStdPromMetrics() string {
+	rec := http.NewServeMux()
+	rec.Handle("/metrics", promhttp.Handler())
+	req, _ := http.NewRequest(http.MethodGet, "/metrics", nil)
+	w := &metricsResponseWriter{}
+	rec.ServeHTTP(w, req)
+	return w.body.String()
+}
+
+type metricsResponseWriter struct {
+	body       bytes.Buffer
+	statusCode int
+}
+
+func (w *metricsResponseWriter) Header() http.Header        { return http.Header{} }
+func (w *metricsResponseWriter) WriteHeader(statusCode int)  { w.statusCode = statusCode }
+func (w *metricsResponseWriter) Write(b []byte) (int, error) { return w.body.Write(b) }
