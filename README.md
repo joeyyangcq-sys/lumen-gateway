@@ -2,6 +2,25 @@
 
 High-performance Layer 7 API gateway built on [Hertz](https://github.com/cloudwego/hertz) (ByteDance) + [Netpoll](https://github.com/cloudwego/netpoll). Supports static YAML config and dynamic etcd-backed config with APISIX-compatible Admin API.
 
+## Why Go Gateway? — vs Apache APISIX (OpenResty/Nginx + LuaJIT)
+
+Apache APISIX is the industry-standard open-source API gateway, built on OpenResty (Nginx C core + LuaJIT). It delivers excellent raw throughput thanks to Nginx's mature event-driven architecture. lumen-gateway takes a different approach — pure Go, built on Hertz + Netpoll — and offers a set of trade-offs that matter in practice:
+
+| Dimension | lumen-gateway (Go/Hertz) | APISIX (OpenResty/LuaJIT) |
+|-----------|--------------------------|---------------------------|
+| **Tail latency** | p99 and max latency significantly lower (max latency only 58% of APISIX at 100 VUs). Go's goroutine scheduler distributes load more evenly — no single request gets starved | Higher throughput ceiling, but occasional latency spikes from Nginx worker contention and LuaJIT GC pauses |
+| **High-concurrency stability** | At 500 VUs, p99 converges with APISIX (~88ms vs ~87ms). Performance degrades gracefully under pressure | Throughput hits ceiling earlier under extreme concurrency; max latency grows faster |
+| **Development experience** | Pure Go — single language for gateway + plugins + business logic. Standard toolchain (go test, go vet, pprof, delve). Plugins are type-safe Go structs with compile-time checks | Lua/OpenResty — separate language ecosystem. Plugin debugging requires OpenResty-specific tooling. Type errors surface at runtime |
+| **Plugin system** | Type-safe `RegisterTypedContext[T]` with compile-time config validation. 5 scopes (global/server/route/service/upstream). Template variable system for dynamic values | Lua-based plugins with runtime schema validation. Rich plugin ecosystem but harder to extend for Go-native teams |
+| **Deployment** | Single static binary (~15MB). No runtime dependencies (no Nginx, no LuaJIT, no OpenResty). Easy to containerize and cross-compile | Requires OpenResty runtime + LuaJIT + Nginx modules. Larger image footprint. More moving parts in production |
+| **Memory safety** | Go's garbage collector — no manual memory management, no buffer overflows, no use-after-free | Nginx C core is memory-safe in practice but Lua/C FFI boundary can introduce subtle bugs |
+| **Observability** | Native Go pprof, runtime metrics, goroutine dumps. Easy integration with Prometheus/OpenTelemetry | Good observability via plugins, but profiling OpenResty/LuaJIT requires specialized tools |
+| **APISIX compatibility** | APISIX-compatible Admin API, etcd storage, bundle import/export — easy migration path | Native APISIX ecosystem |
+
+**When to choose lumen-gateway:** Your team writes Go, you need predictable tail latency (SLA-sensitive workloads), you want a single-binary deployment, or you want to extend the gateway with custom Go plugins without learning Lua/OpenResty.
+
+**When to choose APISIX:** You need maximum raw throughput, you rely on APISIX's extensive plugin ecosystem (100+ plugins), or your team is already invested in the OpenResty/Lua stack.
+
 ## Features
 
 - Hertz + Netpoll non-blocking I/O, Go coroutine scheduling
