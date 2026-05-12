@@ -51,6 +51,10 @@ func NewHTTP(options HTTPOptions) *HTTPProxy {
 		defaultTransport := &http.Transport{
 			Proxy:                 http.ProxyFromEnvironment,
 			ForceAttemptHTTP2:     true,
+			MaxIdleConns:          1024,
+			MaxIdleConnsPerHost:   512,
+			MaxConnsPerHost:       0,
+			IdleConnTimeout:       90 * time.Second,
 			ResponseHeaderTimeout: options.Timeout.Read,
 			TLSHandshakeTimeout:   options.Timeout.Connect,
 		}

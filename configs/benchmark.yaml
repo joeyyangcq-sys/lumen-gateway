@@ -1,0 +1,39 @@
+servers:
+  main:
+    listen: ":18080"
+
+routes:
+  bench-echo:
+    methods: ["GET", "POST"]
+    paths:
+      - "/benchmark/echo"
+    service: bench-service
+
+  health-check:
+    methods: ["GET"]
+    paths:
+      - "= /health"
+    service: bench-service
+    plugins:
+      - name: response_transformer
+        params:
+          status: 200
+          body: '{"status":"ok"}'
+          content_type: application/json
+
+services:
+  bench-service:
+    protocol: http
+    upstream: bench-upstream
+    timeout:
+      connect: 3s
+      read: 5s
+      write: 5s
+
+upstreams:
+  bench-upstream:
+    balancer:
+      type: round_robin
+    endpoints:
+      - address: "127.0.0.1:9001"
+        weight: 1
