@@ -25,6 +25,7 @@ RUN apk add --no-cache ca-certificates tzdata && \
 WORKDIR /app
 COPY --from=builder /lumen-gateway .
 COPY configs/ configs/
+RUN mkdir -p /app/logs && chown lumen:lumen /app/logs
 
 USER lumen
 

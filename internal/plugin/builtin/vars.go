@@ -1,8 +1,10 @@
 package builtin
 
 import (
+	"fmt"
 	"net"
 	"strings"
+	"time"
 
 	"github.com/joey/lumen-gateway/internal/plugin"
 )
@@ -93,8 +95,42 @@ func resolveRequestVariable(pc plugin.PluginContext, variable string) string {
 		return pc.UpstreamID()
 	case "upstream_host":
 		return pc.UpstreamHost()
-	case "endpoint_addr":
+	case "endpoint_addr", "upstream_addr":
 		return pc.EndpointAddress()
+	case "request_method":
+		return pc.RequestMethod()
+	case "status":
+		if s := pc.ResponseStatus(); s > 0 {
+			return fmt.Sprintf("%d", s)
+		}
+		return ""
+	case "body_bytes_sent":
+		return fmt.Sprintf("%d", len(pc.ResponseBody()))
+	case "request_length":
+		return fmt.Sprintf("%d", len(pc.RequestBody()))
+	case "request_time":
+		if t := pc.ProxyInfo().TotalTime; t > 0 {
+			return fmt.Sprintf("%.3f", t.Seconds())
+		}
+		return ""
+	case "upstream_status":
+		if s := pc.UpstreamStatusCode(); s > 0 {
+			return fmt.Sprintf("%d", s)
+		}
+		return ""
+	case "upstream_response_time":
+		if t := pc.ProxyInfo().TotalTime; t > 0 {
+			return fmt.Sprintf("%.3f", t.Seconds())
+		}
+		return ""
+	case "time_local":
+		return time.Now().Format("02/Jan/2006:15:04:05 -0700")
+	case "server_port":
+		host := pc.RequestHost()
+		if _, port, err := net.SplitHostPort(host); err == nil {
+			return port
+		}
+		return ""
 	}
 
 	if strings.HasPrefix(variable, "arg_") {

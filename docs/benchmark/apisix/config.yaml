@@ -1,0 +1,25 @@
+apisix:
+  node_listen: 9080
+  enable_ipv6: false
+
+deployment:
+  role: traditional
+  role_traditional:
+    config_provider: etcd
+  admin:
+    admin_listen:
+      port: 9180
+    allow_admin:
+      - 0.0.0.0/0
+    admin_key:
+      - name: admin
+        key: benchmark-admin-key
+        role: admin
+  etcd:
+    host:
+      - "http://apisix-etcd:2379"
+    prefix: "/apisix"
+    timeout: 30
+
+nginx_config:
+  error_log_level: warn

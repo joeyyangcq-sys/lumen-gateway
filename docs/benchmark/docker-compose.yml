@@ -1,0 +1,85 @@
+name: benchmark
+
+services:
+  # ── Shared backend ──────────────────────────────────────────────────────
+  mock-server:
+    build:
+      context: ../../../mock-server
+      dockerfile: Dockerfile
+    container_name: bench-mock-server
+    networks:
+      - bench-net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9001/ || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ── lumen-gateway ───────────────────────────────────────────────────────
+  lumen:
+    build:
+      context: ../../
+      dockerfile: Dockerfile
+    container_name: bench-lumen
+    command: ["--config", "configs/benchmark-docker-bootstrap.yaml"]
+    ports:
+      - "18080:18080"
+    depends_on:
+      mock-server:
+        condition: service_healthy
+    volumes:
+      - lumen-logs:/app/logs
+    networks:
+      - bench-net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:18080/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ── APISIX etcd ─────────────────────────────────────────────────────────
+  apisix-etcd:
+    image: quay.io/coreos/etcd:v3.5.17
+    container_name: bench-apisix-etcd
+    command:
+      - /usr/local/bin/etcd
+      - --name=etcd0
+      - --data-dir=/etcd-data
+      - --advertise-client-urls=http://apisix-etcd:2379
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --initial-advertise-peer-urls=http://apisix-etcd:2380
+      - --listen-peer-urls=http://0.0.0.0:2380
+      - --initial-cluster=etcd0=http://apisix-etcd:2380
+      - --initial-cluster-token=bench-etcd
+      - --initial-cluster-state=new
+    networks:
+      - bench-net
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/etcdctl", "--endpoints=http://127.0.0.1:2379", "endpoint", "health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ── APISIX ──────────────────────────────────────────────────────────────
+  apisix:
+    image: apache/apisix:3.14.1-debian
+    container_name: bench-apisix
+    depends_on:
+      apisix-etcd:
+        condition: service_healthy
+      mock-server:
+        condition: service_healthy
+    ports:
+      - "9080:9080"
+      - "9180:9180"
+    volumes:
+      - ./apisix/config.yaml:/usr/local/apisix/conf/config.yaml:ro
+    networks:
+      - bench-net
+
+networks:
+  bench-net:
+    driver: bridge
+
+volumes:
+  lumen-logs:

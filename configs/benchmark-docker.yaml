@@ -1,0 +1,47 @@
+servers:
+  main:
+    listen: ":18080"
+
+routes:
+  bench-echo:
+    methods: ["GET", "POST"]
+    paths:
+      - "/benchmark/echo"
+    service: bench-service
+
+  health-check:
+    methods: ["GET"]
+    paths:
+      - "= /health"
+    service: bench-service
+    plugins:
+      - name: response_transformer
+        params:
+          status: 200
+          body: '{"status":"ok"}'
+          content_type: application/json
+
+services:
+  bench-service:
+    protocol: http
+    upstream: bench-upstream
+    timeout:
+      connect: 3s
+      read: 5s
+      write: 5s
+
+upstreams:
+  bench-upstream:
+    balancer:
+      type: round_robin
+    endpoints:
+      - address: "mock-server:9001"
+        weight: 1
+
+global_plugins:
+  - name: access_log
+    params:
+      path: "logs/access.log"
+      format: '$remote_addr - [$time_local] "$request_method $request_uri" $status $body_bytes_sent $request_time'
+      buffer_size: 16384
+      flush_interval: "1s"

@@ -1,0 +1,6 @@
+gateway:
+  listen: ":18080"
+  source: file
+
+file:
+  path: configs/benchmark-docker.yaml

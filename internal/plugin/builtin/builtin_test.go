@@ -2,10 +2,15 @@ package builtin
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/cloudwego/hertz/pkg/app"
+	"github.com/joey/lumen-gateway/internal/observability"
 	"github.com/joey/lumen-gateway/internal/plugin"
 )
 
@@ -418,6 +423,137 @@ func TestPathTransformers(t *testing.T) {
 
 			if got := string(c.Path()); got != tt.wantPath {
 				t.Fatalf("path = %q, want %q", got, tt.wantPath)
+			}
+		})
+	}
+}
+
+func TestAccessLogWritesFormattedLineToFile(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "access.log")
+	registry := newRegistry(t)
+	handler, err := registry.Factory("access_log")(map[string]any{
+		"path":           logPath,
+		"format":         `$remote_addr "$request_method $request_uri" $status $body_bytes_sent $request_time`,
+		"flush_interval": "50ms",
+	})
+	if err != nil {
+		t.Fatalf("factory error = %v", err)
+	}
+
+	c := app.NewContext(0)
+	c.Request.SetMethod("POST")
+	c.Request.URI().SetPath("/api/orders")
+	c.Request.URI().SetQueryString("page=1")
+	c.Request.Header.Set("X-Forwarded-For", "10.0.0.1")
+	plugin.SetProxyInfo(c, observability.ProxyInfo{
+		TotalTime: 123 * time.Millisecond,
+	})
+
+	c.SetHandlers([]app.HandlerFunc{
+		handler,
+		func(_ context.Context, rc *app.RequestContext) {
+			rc.Response.SetStatusCode(200)
+			rc.Response.SetBodyString(`{"ok":true}`)
+		},
+	})
+	c.Next(context.Background())
+
+	time.Sleep(150 * time.Millisecond)
+
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read log file: %v", err)
+	}
+	line := strings.TrimSpace(string(data))
+
+	if !strings.Contains(line, `10.0.0.1`) {
+		t.Errorf("expected remote_addr in log, got: %s", line)
+	}
+	if !strings.Contains(line, `"POST /api/orders?page=1"`) {
+		t.Errorf("expected method+uri in log, got: %s", line)
+	}
+	if !strings.Contains(line, " 200 ") {
+		t.Errorf("expected status 200 in log, got: %s", line)
+	}
+	if !strings.Contains(line, "0.123") {
+		t.Errorf("expected request_time 0.123 in log, got: %s", line)
+	}
+}
+
+func TestAccessLogMissingVariableResolvesToEmpty(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "access.log")
+	registry := newRegistry(t)
+	handler, err := registry.Factory("access_log")(map[string]any{
+		"path":           logPath,
+		"format":         `[$request_id] $upstream_status $nonexistent_var`,
+		"flush_interval": "50ms",
+	})
+	if err != nil {
+		t.Fatalf("factory error = %v", err)
+	}
+
+	c := app.NewContext(0)
+	c.SetHandlers([]app.HandlerFunc{
+		handler,
+		func(context.Context, *app.RequestContext) {},
+	})
+	c.Next(context.Background())
+
+	time.Sleep(150 * time.Millisecond)
+
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read log file: %v", err)
+	}
+	line := strings.TrimSpace(string(data))
+
+	if !strings.HasPrefix(line, "[]") {
+		t.Errorf("expected empty request_id brackets, got: %s", line)
+	}
+	if strings.Contains(line, "nonexistent") {
+		t.Errorf("expected nonexistent_var to resolve to empty, got: %s", line)
+	}
+}
+
+func TestAccessLogRequiresPath(t *testing.T) {
+	registry := newRegistry(t)
+	_, err := registry.Factory("access_log")(map[string]any{
+		"format": `$status`,
+	})
+	if err == nil {
+		t.Fatal("expected error for missing path")
+	}
+}
+
+func TestResponsePhaseVariables(t *testing.T) {
+	pc := plugin.FromRequestContext(app.NewContext(0))
+	pc.Raw().Response.SetStatusCode(404)
+	pc.Raw().Response.SetBodyString("not found")
+	pc.SetProxyInfo(observability.ProxyInfo{TotalTime: 2500 * time.Millisecond})
+	plugin.SetUpstreamStatusCode(pc.Raw(), 502)
+	plugin.SetEndpointAddress(pc.Raw(), "10.0.0.5:8080")
+	pc.Raw().Request.SetMethod("DELETE")
+	pc.Raw().Request.SetBody([]byte("request-body-here"))
+
+	tests := []struct {
+		variable string
+		want     string
+	}{
+		{"$status", "404"},
+		{"$body_bytes_sent", "9"},
+		{"$request_time", "2.500"},
+		{"$upstream_status", "502"},
+		{"$upstream_response_time", "2.500"},
+		{"$upstream_addr", "10.0.0.5:8080"},
+		{"$request_method", "DELETE"},
+		{"$request_length", "17"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.variable, func(t *testing.T) {
+			got := renderRequestTemplate(pc, tt.variable)
+			if got != tt.want {
+				t.Fatalf("%s = %q, want %q", tt.variable, got, tt.want)
 			}
 		})
 	}

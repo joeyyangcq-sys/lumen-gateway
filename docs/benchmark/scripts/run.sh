@@ -17,6 +17,9 @@ step()  { echo -e "${CYAN}[STEP]${NC} $*"; }
 SCENARIOS=("passthrough" "ramp-up")
 GATEWAYS=("lumen" "apisix")
 
+LUMEN_CONTAINER="bench-lumen"
+APISIX_CONTAINER="bench-apisix"
+
 # ── Preflight checks ────────────────────────────────────────────────────────
 
 command -v k6 >/dev/null 2>&1 || { echo "k6 not found. Run: brew install k6"; exit 1; }
@@ -50,8 +53,9 @@ echo "$TIMESTAMP" > "$RESULTS_DIR/timestamp.txt"
     echo "cores: $(sysctl -n hw.ncpu 2>/dev/null || echo unknown)"
     echo "memory: $(sysctl -n hw.memsize 2>/dev/null | awk '{printf "%.0f GB", $1/1073741824}' || echo unknown)"
     echo "k6: $(k6 version 2>/dev/null || echo unknown)"
-    echo "go: $(go version 2>/dev/null || echo unknown)"
     echo "docker: $(docker --version 2>/dev/null || echo unknown)"
+    echo "lumen_image: $(docker inspect $LUMEN_CONTAINER --format '{{.Config.Image}}' 2>/dev/null || echo unknown)"
+    echo "apisix_image: $(docker inspect $APISIX_CONTAINER --format '{{.Config.Image}}' 2>/dev/null || echo unknown)"
 } > "$RESULTS_DIR/system-info.txt"
 
 info "System info saved to results/system-info.txt"
@@ -113,7 +117,6 @@ for scenario in "${SCENARIOS[@]}"; do
         summary="$RESULTS_DIR/$gw/${scenario}_summary.json"
         if [ -f "$summary" ]; then
             echo -e "${YELLOW}--- $gw ---${NC}"
-            # Extract key metrics from k6 summary JSON
             if command -v python3 >/dev/null 2>&1; then
                 python3 -c "
 import json, sys
@@ -139,3 +142,4 @@ done
 
 info "To view full results: ls $RESULTS_DIR/*/"
 info "To update report:     edit $BENCH_DIR/README.md with the numbers above"
+info "To tear down:         docker compose -f $BENCH_DIR/docker-compose.yml down -v"

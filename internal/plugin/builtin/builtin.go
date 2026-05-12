@@ -21,6 +21,7 @@ func Register(registry *plugin.Registry) error {
 		registerReplacePath,
 		registerStripPrefix,
 		registerAddPrefix,
+		registerAccessLog,
 	}
 	for _, register := range registers {
 		if err := register(registry); err != nil {
