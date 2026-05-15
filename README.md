@@ -391,6 +391,41 @@ ENTRYPOINT ["lumen-gateway", "--config", "configs/bootstrap.yaml"]
 ./lumen-gateway admin sync --watch
 ```
 
+### 7.3 全栈部署（Docker Compose 一键启动）
+
+Lumen Gateway 是 Lumen 全栈平台的一部分。使用根目录的 `docker-compose.yml` 可一键启动所有 8 个服务：
+
+```bash
+cd api-gateway
+docker compose up -d --build
+```
+
+**启动顺序**：`etcd` + `PostgreSQL` → `Gateway` → `OAuth` → `MCP Server` + `Prometheus` → `Grafana` → `Admin UI`
+
+启动后验证 Gateway 健康：
+
+```bash
+curl http://localhost:18080/health
+# {"status":"ok"}
+
+# 列出路由
+curl http://localhost:18080/apisix/admin/routes \
+  -H 'X-API-KEY: local-dev-admin-key'
+```
+
+**全栈端口一览**：
+
+| 服务 | 端口 | 地址 |
+|------|------|------|
+| Gateway | 18080 | http://localhost:18080 |
+| OAuth | 9080 | http://localhost:9080 |
+| MCP Server | 9280 | http://localhost:9280 |
+| Admin UI | 5173 | http://localhost:5173 |
+| Grafana | 3000 | http://localhost:3000 |
+| Prometheus | 9090 | http://localhost:9090 |
+| etcd | 2379 | http://localhost:2379 |
+| PostgreSQL | 5432 | localhost:5432 |
+
 ---
 
 ## 8. 代码结构
