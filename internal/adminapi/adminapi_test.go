@@ -38,6 +38,7 @@ func TestHandlerListGetPutDelete(t *testing.T) {
 			Key:     "/apisix/routes/9",
 			Deleted: 1,
 		},
+		validateResourceResult: controlplane.ValidationResult{Valid: true},
 	}
 	handler := NewWithService(svc, "secret")
 

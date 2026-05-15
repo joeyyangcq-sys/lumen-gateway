@@ -104,8 +104,8 @@ func NewWithCompiler(options config.Options, compiler RuntimeCompiler, adminHand
 
 	h := server.Default(server.WithHostPorts(listen))
 	gw := &Gateway{
-		options: options,
-		server:  h,
+		options:  options,
+		server:   h,
 		compiler: compiler,
 	}
 	if len(adminHandlers) > 0 {
@@ -309,8 +309,7 @@ func buildPluginHandlers(
 			continue
 		}
 		if !definition.Supports(scope) {
-			slog.Warn("skipping plugin: unsupported scope", "name", name, "scope", scope)
-			continue
+			return nil, fmt.Errorf("plugin %q does not support %s scope", name, scope)
 		}
 		handler, err := definition.Factory()(params)
 		if err != nil {
@@ -388,6 +387,6 @@ type metricsResponseWriter struct {
 	statusCode int
 }
 
-func (w *metricsResponseWriter) Header() http.Header        { return http.Header{} }
+func (w *metricsResponseWriter) Header() http.Header         { return http.Header{} }
 func (w *metricsResponseWriter) WriteHeader(statusCode int)  { w.statusCode = statusCode }
 func (w *metricsResponseWriter) Write(b []byte) (int, error) { return w.body.Write(b) }
