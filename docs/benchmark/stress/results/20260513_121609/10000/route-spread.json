@@ -1,0 +1,187 @@
+{
+    "metrics": {
+        "http_req_tls_handshaking": {
+            "count": 19431,
+            "min": 0,
+            "p(50)": 0,
+            "p(75)": 0,
+            "avg": 0,
+            "max": 0,
+            "p(90)": 0,
+            "p(95)": 0,
+            "p(99)": 0
+        },
+        "iteration_duration": {
+            "p(99)": 323.33620879999995,
+            "avg": 154.61497385188608,
+            "p(50)": 150.212292,
+            "p(75)": 175.787229,
+            "p(90)": 207.268917,
+            "count": 19431,
+            "min": 1.420584,
+            "max": 5002.946125,
+            "p(95)": 235.00687549999998
+        },
+        "http_req_failed": {
+            "passes": 19431,
+            "fails": 0,
+            "value": 1
+        },
+        "checks": {
+            "passes": 0,
+            "fails": 19431,
+            "value": 0
+        },
+        "data_received": {
+            "count": 0,
+            "rate": 0
+        },
+        "http_req_waiting": {
+            "p(95)": 0,
+            "p(99)": 0,
+            "count": 19431,
+            "avg": 0,
+            "p(50)": 0,
+            "p(90)": 0,
+            "min": 0,
+            "max": 0,
+            "p(75)": 0
+        },
+        "vus_max": {
+            "value": 100,
+            "min": 100,
+            "max": 100
+        },
+        "latency_q4_last_quarter": {
+            "max": 0,
+            "p(50)": 0,
+            "p(90)": 0,
+            "count": 4840,
+            "avg": 0,
+            "min": 0,
+            "p(75)": 0,
+            "p(95)": 0,
+            "p(99)": 0
+        },
+        "vus": {
+            "max": 100,
+            "value": 100,
+            "min": 100
+        },
+        "http_req_receiving": {
+            "min": 0,
+            "max": 0,
+            "p(99)": 0,
+            "avg": 0,
+            "p(50)": 0,
+            "p(75)": 0,
+            "p(90)": 0,
+            "p(95)": 0,
+            "count": 19431
+        },
+        "data_sent": {
+            "rate": 0,
+            "count": 0
+        },
+        "latency_q2_second_quarter": {
+            "min": 0,
+            "max": 0,
+            "p(50)": 0,
+            "p(90)": 0,
+            "p(99)": 0,
+            "p(75)": 0,
+            "p(95)": 0,
+            "count": 4864,
+            "avg": 0
+        },
+        "latency_q1_first_quarter": {
+            "avg": 0,
+            "max": 0,
+            "p(90)": 0,
+            "p(99)": 0,
+            "count": 4895,
+            "min": 0,
+            "p(50)": 0,
+            "p(75)": 0,
+            "p(95)": 0
+        },
+        "iterations": {
+            "rate": 646.2009860326672,
+            "count": 19431
+        },
+        "http_reqs": {
+            "count": 19431,
+            "rate": 646.2009860326672
+        },
+        "http_req_duration": {
+            "p(75)": 0,
+            "p(90)": 0,
+            "max": 0,
+            "p(50)": 0,
+            "p(95)": 0,
+            "p(99)": 0,
+            "count": 19431,
+            "avg": 0,
+            "min": 0
+        },
+        "latency_q3_third_quarter": {
+            "p(90)": 0,
+            "p(95)": 0,
+            "count": 4832,
+            "avg": 0,
+            "min": 0,
+            "p(50)": 0,
+            "p(99)": 0,
+            "max": 0,
+            "p(75)": 0
+        },
+        "http_req_sending": {
+            "avg": 0,
+            "min": 0,
+            "max": 0,
+            "p(75)": 0,
+            "p(90)": 0,
+            "p(95)": 0,
+            "p(99)": 0,
+            "count": 19431,
+            "p(50)": 0
+        },
+        "http_req_blocked": {
+            "min": 0,
+            "max": 0,
+            "p(50)": 0,
+            "p(75)": 0,
+            "p(99)": 0,
+            "avg": 0,
+            "p(90)": 0,
+            "p(95)": 0,
+            "count": 19431
+        },
+        "http_req_connecting": {
+            "avg": 0,
+            "max": 0,
+            "p(95)": 0,
+            "p(99)": 0,
+            "min": 0,
+            "p(50)": 0,
+            "p(75)": 0,
+            "p(90)": 0,
+            "count": 19431
+        }
+    },
+    "root_group": {
+        "id": "d41d8cd98f00b204e9800998ecf8427e",
+        "groups": {},
+        "checks": {
+                "status 200": {
+                    "name": "status 200",
+                    "path": "::status 200",
+                    "id": "fad9fa412b86fcb03bee97c80dcd61f1",
+                    "passes": 0,
+                    "fails": 19431
+                }
+            },
+        "name": "",
+        "path": ""
+    }
+}

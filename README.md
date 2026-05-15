@@ -49,6 +49,33 @@ go build -o lumen-gateway ./cmd/lumen-gateway
 
 See [Developer Guide](docs/guide.md) for full setup instructions.
 
+## Architecture
+
+```
+cmd/lumen-gateway/             Entry point
+internal/
+  gateway/                     Core gateway engine (route matching, request dispatch)
+  router/                      Route table (exact, prefix, regex, wildcard host)
+  proxy/                       Reverse proxy with connection pooling
+  plugin/                      Plugin chain engine + 5-scope priority system
+    builtin/                   9 built-in plugins
+  balancer/                    Load balancer interface
+    roundrobin/                Round-robin implementation
+  health/                      Passive + active health checks
+  config/                      YAML config parser + validation
+  controlplane/                etcd watcher + hot reload
+  adminapi/                    APISIX-compatible Admin API (CRUD, bundle, history)
+  apisix/                      APISIX data model + deserialization
+  translate/                   APISIX config -> internal config translation
+  provider/                    Config provider abstraction (file / etcd)
+  observability/               Prometheus metrics
+  bootstrap/                   App wiring
+  runtimectx/                  Template variable system
+deploy/
+  prometheus/                  Prometheus scrape config
+  grafana/                     Dashboard provisioning + JSON models
+```
+
 ## Documentation
 
 | Document | Description |
