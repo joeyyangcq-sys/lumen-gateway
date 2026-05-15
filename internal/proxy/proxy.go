@@ -26,6 +26,28 @@ var (
 	ErrTimeout       = errors.New("upstream request timed out")
 )
 
+// hopByHopHeaders contains headers that must not be forwarded to the upstream
+// or downstream. Both Title-Case (canonical net/http form) and lowercase
+// variants are included so no per-call EqualFold is needed.
+var hopByHopHeaders = map[string]struct{}{
+	"Connection":          {},
+	"Keep-Alive":          {},
+	"Proxy-Authenticate":  {},
+	"Proxy-Authorization": {},
+	"Te":                  {},
+	"Trailer":             {},
+	"Transfer-Encoding":   {},
+	"Upgrade":             {},
+	"connection":          {},
+	"keep-alive":          {},
+	"proxy-authenticate":  {},
+	"proxy-authorization": {},
+	"te":                  {},
+	"trailer":             {},
+	"transfer-encoding":   {},
+	"upgrade":             {},
+}
+
 type Target struct {
 	Scheme  string
 	Address string
@@ -89,13 +111,6 @@ func (p *HTTPProxy) ServeHTTP(ctx context.Context, c *app.RequestContext, target
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
-	timings.finishBodyRead()
-	if err != nil {
-		recordUpstreamObservation(c, target, timings.snapshot(), resp.StatusCode, classifyErrorType(err, timings))
-		return classifyRequestError(err)
-	}
-
 	c.Response.Reset()
 	c.Response.SetStatusCode(resp.StatusCode)
 	for key, values := range resp.Header {
@@ -106,7 +121,12 @@ func (p *HTTPProxy) ServeHTTP(ctx context.Context, c *app.RequestContext, target
 			c.Response.Header.Add(key, value)
 		}
 	}
-	c.Response.SetBodyRaw(body)
+	_, err = io.Copy(c.Response.BodyWriter(), resp.Body)
+	timings.finishBodyRead()
+	if err != nil {
+		recordUpstreamObservation(c, target, timings.snapshot(), resp.StatusCode, classifyErrorType(err, timings))
+		return classifyRequestError(err)
+	}
 	recordUpstreamObservation(c, target, timings.snapshot(), resp.StatusCode, "")
 	return nil
 }
@@ -187,26 +207,8 @@ func requestTimeout(timeout config.TimeoutOptions) time.Duration {
 }
 
 func isHopByHopHeader(key string) bool {
-	switch {
-	case strings.EqualFold(key, "Connection"):
-		return true
-	case strings.EqualFold(key, "Keep-Alive"):
-		return true
-	case strings.EqualFold(key, "Proxy-Authenticate"):
-		return true
-	case strings.EqualFold(key, "Proxy-Authorization"):
-		return true
-	case strings.EqualFold(key, "Te"):
-		return true
-	case strings.EqualFold(key, "Trailer"):
-		return true
-	case strings.EqualFold(key, "Transfer-Encoding"):
-		return true
-	case strings.EqualFold(key, "Upgrade"):
-		return true
-	default:
-		return false
-	}
+	_, ok := hopByHopHeaders[key]
+	return ok
 }
 
 type traceTimings struct {

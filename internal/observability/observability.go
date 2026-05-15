@@ -133,15 +133,7 @@ func (r *MemoryRecorder) ObservePlugin(labels PluginLabels, duration time.Durati
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	executionKey := renderLabelKey(map[string]string{
-		"plugin":      labels.Plugin,
-		"scope":       labels.Scope,
-		"phase":       labels.Phase,
-		"route_id":    labels.RouteID,
-		"service_id":  labels.ServiceID,
-		"upstream_id": labels.UpstreamID,
-		"result":      labels.Result,
-	})
+	executionKey := renderPluginKey(labels)
 	r.pluginExecutions[executionKey]++
 	r.observeHistogram(r.pluginDurations, executionKey, duration.Seconds(), pluginDurationBuckets())
 }
@@ -150,26 +142,16 @@ func (r *MemoryRecorder) ObserveUpstream(labels UpstreamLabels, info ProxyInfo) 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	baseKey := renderLabelKey(map[string]string{
-		"route_id":     labels.RouteID,
-		"service_id":   labels.ServiceID,
-		"upstream_id":  labels.UpstreamID,
-		"endpoint":     labels.Endpoint,
-		"scheme":       labels.Scheme,
-		"method":       labels.Method,
-		"status_class": labels.StatusClass,
-		"error_type":   labels.ErrorType,
-		"reused_conn":  fmt.Sprintf("%t", labels.ReusedConn),
-	})
+	baseKey := renderUpstreamKey(labels, "")
 	r.upstreamRequests[baseKey]++
 
-	r.observeUpstreamPhase(baseKey, "connect", info.ConnectTime)
-	r.observeUpstreamPhase(baseKey, "tls_handshake", info.TLSHandshakeTime)
-	r.observeUpstreamPhase(baseKey, "request_write", info.RequestWriteTime)
-	r.observeUpstreamPhase(baseKey, "first_byte", info.FirstByteTime)
-	r.observeUpstreamPhase(baseKey, "response_read", info.ResponseReadTime)
-	r.observeUpstreamPhase(baseKey, "processing_estimate", info.ProcessingEstimate)
-	r.observeUpstreamPhase(baseKey, "total", info.TotalTime)
+	r.observeUpstreamPhase(labels, "connect", info.ConnectTime)
+	r.observeUpstreamPhase(labels, "tls_handshake", info.TLSHandshakeTime)
+	r.observeUpstreamPhase(labels, "request_write", info.RequestWriteTime)
+	r.observeUpstreamPhase(labels, "first_byte", info.FirstByteTime)
+	r.observeUpstreamPhase(labels, "response_read", info.ResponseReadTime)
+	r.observeUpstreamPhase(labels, "processing_estimate", info.ProcessingEstimate)
+	r.observeUpstreamPhase(labels, "total", info.TotalTime)
 }
 
 func (r *MemoryRecorder) RenderPrometheus() string {
@@ -294,8 +276,8 @@ func (r *MemoryRecorder) observeHistogram(target map[string]*histogram, key stri
 	h.observe(value)
 }
 
-func (r *MemoryRecorder) observeUpstreamPhase(baseKey, phase string, duration time.Duration) {
-	key := injectPhaseLabel(baseKey, phase)
+func (r *MemoryRecorder) observeUpstreamPhase(labels UpstreamLabels, phase string, duration time.Duration) {
+	key := renderUpstreamKey(labels, phase)
 	r.observeHistogram(r.upstreamDurations, key, duration.Seconds(), upstreamDurationBuckets())
 }
 
@@ -349,6 +331,66 @@ func upstreamDurationBuckets() []float64 {
 	return []float64{0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10}
 }
 
+// renderPluginKey builds the Prometheus label key for plugin metrics.
+// Keys are in sorted order: phase, plugin, result, route_id, scope, service_id, upstream_id.
+func renderPluginKey(labels PluginLabels) string {
+	var b strings.Builder
+	b.Grow(160)
+	b.WriteByte('{')
+	first := true
+	first = appendLabel(&b, first, "phase", labels.Phase)
+	first = appendLabel(&b, first, "plugin", labels.Plugin)
+	first = appendLabel(&b, first, "result", labels.Result)
+	first = appendLabel(&b, first, "route_id", labels.RouteID)
+	first = appendLabel(&b, first, "scope", labels.Scope)
+	first = appendLabel(&b, first, "service_id", labels.ServiceID)
+	_ = appendLabel(&b, first, "upstream_id", labels.UpstreamID)
+	b.WriteByte('}')
+	return b.String()
+}
+
+// renderUpstreamKey builds the Prometheus label key for upstream metrics.
+// If phase is non-empty it is inserted in sorted position (between "method" and "reused_conn").
+// Keys are in sorted order: endpoint, error_type, method, [phase,] reused_conn, route_id, scheme,
+// service_id, status_class, upstream_id.
+func renderUpstreamKey(labels UpstreamLabels, phase string) string {
+	reusedConnStr := "false"
+	if labels.ReusedConn {
+		reusedConnStr = "true"
+	}
+	var b strings.Builder
+	b.Grow(220)
+	b.WriteByte('{')
+	first := true
+	first = appendLabel(&b, first, "endpoint", labels.Endpoint)
+	first = appendLabel(&b, first, "error_type", labels.ErrorType)
+	first = appendLabel(&b, first, "method", labels.Method)
+	first = appendLabel(&b, first, "phase", phase)
+	first = appendLabel(&b, first, "reused_conn", reusedConnStr)
+	first = appendLabel(&b, first, "route_id", labels.RouteID)
+	first = appendLabel(&b, first, "scheme", labels.Scheme)
+	first = appendLabel(&b, first, "service_id", labels.ServiceID)
+	first = appendLabel(&b, first, "status_class", labels.StatusClass)
+	_ = appendLabel(&b, first, "upstream_id", labels.UpstreamID)
+	b.WriteByte('}')
+	return b.String()
+}
+
+// appendLabel writes key="value" to b in Prometheus label format, preceded by a comma
+// if it is not the first label. Empty values are skipped. Returns whether the next
+// label written will still be the first.
+func appendLabel(b *strings.Builder, first bool, key, value string) bool {
+	if value == "" {
+		return first
+	}
+	if !first {
+		b.WriteByte(',')
+	}
+	fmt.Fprintf(b, "%s=%q", key, value)
+	return false
+}
+
+// renderLabelKey is the generic label renderer used by Stats() and tests.
 func renderLabelKey(labels map[string]string) string {
 	keys := make([]string, 0, len(labels))
 	for key, value := range labels {
@@ -367,12 +409,6 @@ func renderLabelKey(labels map[string]string) string {
 		parts = append(parts, fmt.Sprintf("%s=%q", key, labels[key]))
 	}
 	return "{" + strings.Join(parts, ",") + "}"
-}
-
-func injectPhaseLabel(baseKey, phase string) string {
-	labels := parseLabelKey(baseKey)
-	labels["phase"] = phase
-	return renderLabelKey(labels)
 }
 
 func parseLabelKey(key string) map[string]string {

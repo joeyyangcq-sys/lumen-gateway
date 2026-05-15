@@ -9,6 +9,11 @@ services:
     container_name: bench-mock-server
     networks:
       - bench-net
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 512M
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:9001/ || exit 1"]
       interval: 5s
@@ -31,6 +36,12 @@ services:
       - lumen-logs:/app/logs
     networks:
       - bench-net
+    # Same resource budget as APISIX for a fair comparison.
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 512M
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:18080/health || exit 1"]
       interval: 5s
@@ -54,6 +65,11 @@ services:
       - --initial-cluster-state=new
     networks:
       - bench-net
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
     healthcheck:
       test: ["CMD", "/usr/local/bin/etcdctl", "--endpoints=http://127.0.0.1:2379", "endpoint", "health"]
       interval: 5s
@@ -76,6 +92,12 @@ services:
       - ./apisix/config.yaml:/usr/local/apisix/conf/config.yaml:ro
     networks:
       - bench-net
+    # Same resource budget as lumen for a fair comparison.
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 512M
 
 networks:
   bench-net:

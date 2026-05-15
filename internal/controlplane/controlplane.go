@@ -310,25 +310,29 @@ func (s *Service) normalizeForWrite(ctx context.Context, kind ResourceKind, id s
 	}
 	now := time.Now().Unix()
 	decoded["id"] = id
-
-	existing, getErr := s.store.Get(ctx, kind, id)
-	switch {
-	case getErr == nil:
-		existingDecoded, err := decodeJSONObject(existing.Value)
-		if err != nil {
-			return nil, err
-		}
-		if created, ok := existingDecoded["create_time"]; ok {
-			decoded["create_time"] = created
-		} else {
-			decoded["create_time"] = now
-		}
-	case errors.Is(getErr, ErrNotFound):
-		decoded["create_time"] = now
-	case getErr != nil:
-		return nil, getErr
-	}
 	decoded["update_time"] = now
+
+	// Skip the store round-trip when create_time is already present in the body
+	// (e.g. from a prior export/apply cycle or a Patch merge that carried it over).
+	if _, hasCreateTime := decoded["create_time"]; !hasCreateTime {
+		existing, getErr := s.store.Get(ctx, kind, id)
+		switch {
+		case getErr == nil:
+			existingDecoded, err := decodeJSONObject(existing.Value)
+			if err != nil {
+				return nil, err
+			}
+			if created, ok := existingDecoded["create_time"]; ok {
+				decoded["create_time"] = created
+			} else {
+				decoded["create_time"] = now
+			}
+		case errors.Is(getErr, ErrNotFound):
+			decoded["create_time"] = now
+		default:
+			return nil, getErr
+		}
+	}
 
 	normalized, err := json.Marshal(decoded)
 	if err != nil {

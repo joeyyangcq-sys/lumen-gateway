@@ -13,6 +13,7 @@ NC='\033[0m'
 
 info()  { echo -e "${GREEN}[INFO]${NC} $*"; }
 step()  { echo -e "${CYAN}[STEP]${NC} $*"; }
+warn()  { echo -e "${YELLOW}[WARN]${NC} $*"; }
 
 SCENARIOS=("passthrough" "ramp-up")
 GATEWAYS=("lumen" "apisix")
@@ -20,20 +21,49 @@ GATEWAYS=("lumen" "apisix")
 LUMEN_CONTAINER="bench-lumen"
 APISIX_CONTAINER="bench-apisix"
 
+COMPOSE="docker compose -f $BENCH_DIR/docker-compose.yml"
+
 # ── Preflight checks ────────────────────────────────────────────────────────
 
 command -v k6 >/dev/null 2>&1 || { echo "k6 not found. Run: brew install k6"; exit 1; }
 
-for gw in "${GATEWAYS[@]}"; do
-    if [ "$gw" = "lumen" ]; then
-        url="http://localhost:18080/benchmark/echo"
-    else
-        url="http://localhost:9080/benchmark/echo"
-    fi
-    if ! curl -sf "$url" >/dev/null 2>&1; then
-        echo "WARNING: $gw not reachable at $url — run setup.sh first"
-    fi
-done
+# ── Helpers ──────────────────────────────────────────────────────────────────
+
+gateway_url() {
+    if [ "$1" = "lumen" ]; then echo "http://localhost:18080"; else echo "http://localhost:9080"; fi
+}
+
+gateway_container() {
+    if [ "$1" = "lumen" ]; then echo "$LUMEN_CONTAINER"; else echo "$APISIX_CONTAINER"; fi
+}
+
+# Start only the target gateway; stop the other to prevent resource contention.
+# Both share the same cpu/memory limits in docker-compose (2 CPUs / 512 MB),
+# so whichever gateway is stopped frees its quota to the OS.
+start_only() {
+    local gw="$1"
+    local other
+    if [ "$gw" = "lumen" ]; then other="apisix"; else other="lumen"; fi
+
+    step "Stopping $other to free resources..."
+    $COMPOSE stop "$other" 2>/dev/null || true
+
+    step "Starting $gw..."
+    $COMPOSE start "$gw"
+
+    local url
+    url="$(gateway_url "$gw")/benchmark/echo"
+    local retries=20
+    for i in $(seq 1 $retries); do
+        if curl -sf "$url" >/dev/null 2>&1; then
+            info "$gw is ready at $url"
+            return 0
+        fi
+        sleep 2
+    done
+    echo "ERROR: $gw did not become healthy after ${retries} retries" >&2
+    exit 1
+}
 
 # ── Clean previous results ───────────────────────────────────────────────────
 
@@ -54,34 +84,44 @@ echo "$TIMESTAMP" > "$RESULTS_DIR/timestamp.txt"
     echo "memory: $(sysctl -n hw.memsize 2>/dev/null | awk '{printf "%.0f GB", $1/1073741824}' || echo unknown)"
     echo "k6: $(k6 version 2>/dev/null || echo unknown)"
     echo "docker: $(docker --version 2>/dev/null || echo unknown)"
+    echo "gateway_limit_cpus: 2.0"
+    echo "gateway_limit_memory: 512M"
+    echo "mock_server_limit_cpus: 2.0"
+    echo "mock_server_limit_memory: 512M"
     echo "lumen_image: $(docker inspect $LUMEN_CONTAINER --format '{{.Config.Image}}' 2>/dev/null || echo unknown)"
     echo "apisix_image: $(docker inspect $APISIX_CONTAINER --format '{{.Config.Image}}' 2>/dev/null || echo unknown)"
+    echo "methodology: one_gateway_at_a_time"
 } > "$RESULTS_DIR/system-info.txt"
 
 info "System info saved to results/system-info.txt"
 
-# ── Warmup ───────────────────────────────────────────────────────────────────
+# ── Run benchmarks — one gateway at a time ───────────────────────────────────
+#
+# Each gateway gets exclusive use of its Docker resource quota (2 CPUs, 512 MB)
+# while the other container is stopped.  All scenarios for a gateway are run
+# back-to-back before switching, so TCP state and OS page-cache stay warm.
 
 for gw in "${GATEWAYS[@]}"; do
-    if [ "$gw" = "lumen" ]; then
-        url="http://localhost:18080/benchmark/echo"
-    else
-        url="http://localhost:9080/benchmark/echo"
-    fi
-    step "Warming up $gw..."
-    k6 run --quiet --duration 3s --vus 5 - <<WARMUP 2>/dev/null || true
+    echo ""
+    step "========================================"
+    step "  Gateway: $gw"
+    step "========================================"
+
+    # Bring up only this gateway
+    start_only "$gw"
+
+    # Warmup — prime connection pools and JIT (LuaJIT for APISIX)
+    step "Warming up $gw (5 VUs × 5s)..."
+    k6 run --quiet --duration 5s --vus 5 - <<WARMUP 2>/dev/null || true
 import http from 'k6/http';
-export default function() { http.get('${url}'); }
+export default function() { http.post('$(gateway_url "$gw")/benchmark/echo', JSON.stringify({warmup:true}), {headers:{'Content-Type':'application/json'}}); }
 WARMUP
-    sleep 2
-done
+    sleep 3
 
-# ── Run benchmarks ───────────────────────────────────────────────────────────
-
-for scenario in "${SCENARIOS[@]}"; do
-    for gw in "${GATEWAYS[@]}"; do
+    # Run all scenarios for this gateway
+    for scenario in "${SCENARIOS[@]}"; do
         echo ""
-        step "Running [$scenario] against [$gw]..."
+        step "Running [$scenario] on [$gw]..."
 
         bash "$SCRIPT_DIR/collect-resources.sh" "$gw" \
             "$RESULTS_DIR/$gw/${scenario}_resources.csv" &
@@ -94,21 +134,30 @@ for scenario in "${SCENARIOS[@]}"; do
         kill $RESOURCE_PID 2>/dev/null || true
         wait $RESOURCE_PID 2>/dev/null || true
 
-        info "Results saved to results/$gw/${scenario}_summary.json"
-        info "Waiting 30s for TCP TIME_WAIT cleanup..."
-        sleep 30
+        info "Saved → results/$gw/${scenario}_summary.json"
+
+        if [ "$scenario" != "${SCENARIOS[${#SCENARIOS[@]}-1]}" ]; then
+            info "Cooling down 30s before next scenario..."
+            sleep 30
+        fi
     done
+
+    # Stop this gateway before switching
+    step "Stopping $gw..."
+    $COMPOSE stop "$gw" 2>/dev/null || true
+
+    if [ "$gw" != "${GATEWAYS[${#GATEWAYS[@]}-1]}" ]; then
+        info "Cooling down 30s (TCP TIME_WAIT) before next gateway..."
+        sleep 30
+    fi
 done
 
-# ── Generate comparison ─────────────────────────────────────────────────────
+# ── Print comparison ─────────────────────────────────────────────────────────
 
 echo ""
 info "=========================================="
 info "  Benchmark Complete!"
 info "=========================================="
-echo ""
-info "Results directory: $RESULTS_DIR"
-info "System info:       $RESULTS_DIR/system-info.txt"
 echo ""
 
 for scenario in "${SCENARIOS[@]}"; do
@@ -119,27 +168,26 @@ for scenario in "${SCENARIOS[@]}"; do
             echo -e "${YELLOW}--- $gw ---${NC}"
             if command -v python3 >/dev/null 2>&1; then
                 python3 -c "
-import json, sys
+import json
 with open('$summary') as f:
     d = json.load(f)
 m = d.get('metrics', {})
-dur = m.get('http_req_duration', {}).get('values', {})
-reqs = m.get('http_reqs', {}).get('values', {})
-fails = m.get('http_req_failed', {}).get('values', {})
-print(f\"  RPS:       {reqs.get('rate', 'N/A'):.1f}\")
-print(f\"  p50:       {dur.get('p(50)', 'N/A'):.2f} ms\")
-print(f\"  p95:       {dur.get('p(95)', 'N/A'):.2f} ms\")
-print(f\"  p99:       {dur.get('p(99)', 'N/A'):.2f} ms\")
-print(f\"  avg:       {dur.get('avg', 'N/A'):.2f} ms\")
-print(f\"  max:       {dur.get('max', 'N/A'):.2f} ms\")
+dur = m.get('http_req_duration', {})
+reqs = m.get('http_reqs', {})
+fails = m.get('http_req_failed', {})
+print(f\"  RPS:       {reqs.get('rate', 0):.1f}\")
+print(f\"  avg:       {dur.get('avg', 0):.2f} ms\")
+print(f\"  p50:       {dur.get('p(50)', 0):.2f} ms\")
+print(f\"  p95:       {dur.get('p(95)', 0):.2f} ms\")
+print(f\"  p99:       {dur.get('p(99)', 0):.2f} ms\")
+print(f\"  max:       {dur.get('max', 0):.2f} ms\")
 print(f\"  err rate:  {fails.get('rate', 0)*100:.2f}%\")
-" 2>/dev/null || echo "  (install python3 or check $summary manually)"
+" 2>/dev/null || echo "  (check $summary manually)"
             fi
         fi
     done
     echo ""
 done
 
-info "To view full results: ls $RESULTS_DIR/*/"
-info "To update report:     edit $BENCH_DIR/README.md with the numbers above"
-info "To tear down:         docker compose -f $BENCH_DIR/docker-compose.yml down -v"
+info "Results: $RESULTS_DIR"
+info "Tear down: docker compose -f $BENCH_DIR/docker-compose.yml down -v"
