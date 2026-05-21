@@ -75,6 +75,10 @@ func (c *Compiler) BuildRegistry() (*plugin.Registry, error) {
 }
 
 func (c *Compiler) Compile(options config.Options) (*RuntimeSnapshot, error) {
+	if len(options.Servers) > 1 {
+		return nil, fmt.Errorf("multiple servers are not supported: got %d", len(options.Servers))
+	}
+
 	registry, err := c.registryFactory()
 	if err != nil {
 		return nil, err

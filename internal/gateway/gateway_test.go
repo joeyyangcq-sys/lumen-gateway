@@ -211,6 +211,51 @@ func TestRuntimeSnapshotCloseWaitsForInflightRequests(t *testing.T) {
 	}
 }
 
+func TestRuntimeSnapshotCloseAcquireRace(t *testing.T) {
+	for i := 0; i < 100; i++ {
+		var closed atomic.Int32
+		snapshot := newRuntimeSnapshot(closeFunc(func() error {
+			closed.Add(1)
+			return nil
+		}))
+
+		start := make(chan struct{})
+		acquired := make(chan bool, 1)
+		closeDone := make(chan error, 1)
+		go func() {
+			<-start
+			if ok := snapshot.acquire(); ok {
+				snapshot.release()
+				acquired <- true
+				return
+			}
+			acquired <- false
+		}()
+		go func() {
+			<-start
+			closeDone <- snapshot.Close()
+		}()
+		close(start)
+
+		select {
+		case err := <-closeDone:
+			if err != nil {
+				t.Fatalf("Close() error = %v", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("Close() did not return")
+		}
+		select {
+		case <-acquired:
+		case <-time.After(time.Second):
+			t.Fatal("acquire goroutine did not return")
+		}
+		if got := closed.Load(); got != 1 {
+			t.Fatalf("closed resources = %d, want 1", got)
+		}
+	}
+}
+
 func TestReloadPreservesAccessLogForInflightRequest(t *testing.T) {
 	logPath := filepath.Join(t.TempDir(), "access.log")
 	blocked := make(chan struct{})
@@ -320,6 +365,52 @@ func TestReloadPreservesAccessLogForInflightRequest(t *testing.T) {
 	}
 	if got := string(data); !strings.Contains(got, "GET 201\n") {
 		t.Fatalf("access log = %q, want in-flight request entry", got)
+	}
+}
+
+func TestBuildSnapshotRejectsMultipleServers(t *testing.T) {
+	options := gatewayOptions("127.0.0.1:9001")
+	options.Servers["second"] = config.ServerOptions{
+		ID:     "second",
+		Listen: ":8081",
+	}
+
+	_, err := BuildSnapshot(options)
+	if err == nil {
+		t.Fatal("BuildSnapshot() error = nil, want multiple server error")
+	}
+	if !strings.Contains(err.Error(), "multiple servers are not supported") {
+		t.Fatalf("BuildSnapshot() error = %q, want multiple server error", err.Error())
+	}
+}
+
+func TestMetricsResponseWriterPreservesHeadersAndStatus(t *testing.T) {
+	writer := &metricsResponseWriter{}
+	writer.Header().Set("Content-Type", "text/plain")
+	writer.WriteHeader(http.StatusAccepted)
+	writer.WriteHeader(http.StatusInternalServerError)
+	if _, err := writer.Write([]byte("ok")); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+
+	if got := writer.Header().Get("Content-Type"); got != "text/plain" {
+		t.Fatalf("Content-Type = %q, want text/plain", got)
+	}
+	if got := writer.statusCode; got != http.StatusAccepted {
+		t.Fatalf("statusCode = %d, want %d", got, http.StatusAccepted)
+	}
+	if got := writer.body.String(); got != "ok" {
+		t.Fatalf("body = %q, want ok", got)
+	}
+}
+
+func TestMetricsResponseWriterDefaultsStatusOnWrite(t *testing.T) {
+	writer := &metricsResponseWriter{}
+	if _, err := writer.Write([]byte("ok")); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+	if got := writer.statusCode; got != http.StatusOK {
+		t.Fatalf("statusCode = %d, want %d", got, http.StatusOK)
 	}
 }
 
@@ -766,14 +857,14 @@ func (f adminHandlerFunc) ServeHTTP(ctx context.Context, c *app.RequestContext) 
 	return f(ctx, c)
 }
 
-// awaitDraining spins until s.draining is true, meaning Close() has set the
+// awaitDraining spins until s.state is closing, meaning Close() has set the
 // drain flag and is now waiting for in-flight requests to finish.
 // Using this instead of time.After avoids false passes on a loaded scheduler.
 func awaitDraining(t *testing.T, s *RuntimeSnapshot) {
 	t.Helper()
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
-		if s.draining.Load() {
+		if s.state.Load() == snapshotStateClosing {
 			return
 		}
 		runtime.Gosched()
