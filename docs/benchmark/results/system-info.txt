@@ -1,10 +1,10 @@
-date: 2026-05-15T15:01:25Z
-os: Darwin 25.2.0 arm64
-cpu: Apple M1 Pro
-cores: 8
-memory: 16 GB
+date: 2026-05-21T11:02:53Z
+os: Darwin 25.4.0 arm64
+cpu: Apple M3 Max
+cores: 16
+memory: 48 GB
 k6: k6 v2.0.0 (commit/devel, go1.26.3, darwin/arm64)
-docker: Docker version 28.5.1, build e180ab8
+docker: Docker version 29.4.3, build 055a478
 gateway_limit_cpus: 2.0
 gateway_limit_memory: 512M
 mock_server_limit_cpus: 2.0
@@ -12,3 +12,4 @@ mock_server_limit_memory: 512M
 lumen_image: benchmark-lumen
 apisix_image: apache/apisix:3.14.1-debian
 methodology: one_gateway_at_a_time
+scenarios: passthrough(pure-proxy) pipeline(request_id+access_log) ramp-up spike
