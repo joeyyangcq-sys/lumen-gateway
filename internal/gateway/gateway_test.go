@@ -7,14 +7,18 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/joey/lumen-gateway/internal/config"
 	"github.com/joey/lumen-gateway/internal/observability"
 	"github.com/joey/lumen-gateway/internal/plugin"
+	"github.com/joey/lumen-gateway/internal/plugin/builtin"
 	"github.com/joey/lumen-gateway/internal/proxy"
 )
 
@@ -164,6 +168,163 @@ func TestCompileClosesBuiltResourcesOnError(t *testing.T) {
 	}
 	if got := closed.Load(); got != 1 {
 		t.Fatalf("closed resources after compile error = %d, want 1", got)
+	}
+}
+
+func TestRuntimeSnapshotCloseWaitsForInflightRequests(t *testing.T) {
+	var closed atomic.Int32
+	snapshot := &RuntimeSnapshot{
+		closers: []io.Closer{closeFunc(func() error {
+			closed.Add(1)
+			return nil
+		})},
+	}
+
+	if !snapshot.acquire() {
+		t.Fatal("acquire() = false, want true")
+	}
+
+	closeDone := make(chan error, 1)
+	go func() {
+		closeDone <- snapshot.Close()
+	}()
+
+	select {
+	case err := <-closeDone:
+		t.Fatalf("Close() returned before release, err = %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	if got := closed.Load(); got != 0 {
+		t.Fatalf("closed resources while request was in-flight = %d, want 0", got)
+	}
+	if snapshot.acquire() {
+		t.Fatal("acquire() = true while snapshot is closing, want false")
+	}
+
+	snapshot.release()
+
+	select {
+	case err := <-closeDone:
+		if err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Close() did not return after release")
+	}
+	if got := closed.Load(); got != 1 {
+		t.Fatalf("closed resources = %d, want 1", got)
+	}
+}
+
+func TestReloadPreservesAccessLogForInflightRequest(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "access.log")
+	blocked := make(chan struct{})
+	release := make(chan struct{})
+
+	compiler := NewRuntimeCompiler(WithRegistryFactory(func() (*plugin.Registry, error) {
+		registry := plugin.NewRegistry()
+		if err := builtin.Register(registry); err != nil {
+			return nil, err
+		}
+		if err := plugin.RegisterTypedContext[struct{}](registry, plugin.Metadata{
+			Name:     "block",
+			Priority: 200,
+			Scopes:   []plugin.Scope{plugin.ScopeRoute},
+		}, func(struct{}) (plugin.ContextHandler, error) {
+			return func(ctx context.Context, pc plugin.PluginContext) {
+				select {
+				case blocked <- struct{}{}:
+				default:
+				}
+				<-release
+				pc.Next(ctx)
+			}, nil
+		}); err != nil {
+			return nil, err
+		}
+		return registry, nil
+	}))
+
+	options := gatewayOptions("127.0.0.1:9001")
+	options.GlobalPlugins = append(options.GlobalPlugins, config.PluginRef{
+		Name: "access_log",
+		Params: map[string]any{
+			"path":           logPath,
+			"format":         "$request_method $status",
+			"flush_interval": "1h",
+		},
+	})
+	route := options.Routes["user-api"]
+	route.Plugins = append(route.Plugins, config.PluginRef{Name: "block"})
+	options.Routes["user-api"] = route
+
+	gw, err := NewWithCompiler(options, compiler)
+	if err != nil {
+		t.Fatalf("NewWithCompiler() error = %v", err)
+	}
+	defer func() {
+		_ = gw.Shutdown()
+	}()
+	installTransport(gw, roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusCreated,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader("created")),
+		}, nil
+	}))
+
+	requestDone := make(chan struct{})
+	go func() {
+		defer close(requestDone)
+		c := app.NewContext(0)
+		c.Request.SetMethod("GET")
+		c.Request.SetHost("original.test")
+		c.Request.URI().SetPath("/api/users")
+		gw.ServeHTTP(context.Background(), c)
+		if got := c.Response.StatusCode(); got != http.StatusCreated {
+			t.Errorf("status = %d, want %d", got, http.StatusCreated)
+		}
+	}()
+
+	select {
+	case <-blocked:
+	case <-time.After(time.Second):
+		t.Fatal("request did not reach blocking plugin")
+	}
+
+	reloadDone := make(chan error, 1)
+	go func() {
+		reloadDone <- gw.Reload(options)
+	}()
+
+	select {
+	case err := <-reloadDone:
+		t.Fatalf("Reload() returned while request was still in-flight, err = %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(release)
+
+	select {
+	case <-requestDone:
+	case <-time.After(time.Second):
+		t.Fatal("request did not finish after release")
+	}
+	select {
+	case err := <-reloadDone:
+		if err != nil {
+			t.Fatalf("Reload() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Reload() did not finish after request completed")
+	}
+
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read access log: %v", err)
+	}
+	if got := string(data); !strings.Contains(got, "GET 201\n") {
+		t.Fatalf("access log = %q, want in-flight request entry", got)
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"slices"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -44,6 +45,11 @@ type RuntimeSnapshot struct {
 	Services       map[string]*Service
 	Upstreams      map[string]*Upstream
 	closers        []io.Closer
+	lifecycleMu    sync.Mutex
+	lifecycleCond  *sync.Cond
+	inFlight       int
+	closing        bool
+	closed         bool
 }
 
 type Service struct {
@@ -201,11 +207,18 @@ func (g *Gateway) ServeHTTP(ctx context.Context, c *app.RequestContext) {
 		return
 	}
 
-	snapshot := g.snapshot.Load()
-	if snapshot == nil || snapshot.Router == nil {
-		handler = "unavailable"
-		c.SetStatusCode(503)
-		return
+	var snapshot *RuntimeSnapshot
+	for {
+		snapshot = g.snapshot.Load()
+		if snapshot == nil || snapshot.Router == nil {
+			handler = "unavailable"
+			c.SetStatusCode(503)
+			return
+		}
+		if snapshot.acquire() {
+			defer snapshot.release()
+			break
+		}
 	}
 
 	route, ok := snapshot.Router.Match(string(c.Method()), string(c.Host()), string(c.Path()))
@@ -238,6 +251,25 @@ func (s *RuntimeSnapshot) Close() error {
 	if s == nil {
 		return nil
 	}
+	s.lifecycleMu.Lock()
+	cond := s.lifecycleCondLocked()
+	if s.closed {
+		s.lifecycleMu.Unlock()
+		return nil
+	}
+	if s.closing {
+		for !s.closed {
+			cond.Wait()
+		}
+		s.lifecycleMu.Unlock()
+		return nil
+	}
+	s.closing = true
+	for s.inFlight > 0 {
+		cond.Wait()
+	}
+	s.lifecycleMu.Unlock()
+
 	var err error
 	for i := len(s.closers) - 1; i >= 0; i-- {
 		if closeErr := s.closers[i].Close(); err == nil {
@@ -245,7 +277,38 @@ func (s *RuntimeSnapshot) Close() error {
 		}
 	}
 	s.closers = nil
+
+	s.lifecycleMu.Lock()
+	s.closed = true
+	cond.Broadcast()
+	s.lifecycleMu.Unlock()
 	return err
+}
+
+func (s *RuntimeSnapshot) acquire() bool {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	if s.closing || s.closed {
+		return false
+	}
+	s.inFlight++
+	return true
+}
+
+func (s *RuntimeSnapshot) release() {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	s.inFlight--
+	if s.inFlight == 0 && s.closing && s.lifecycleCond != nil {
+		s.lifecycleCond.Broadcast()
+	}
+}
+
+func (s *RuntimeSnapshot) lifecycleCondLocked() *sync.Cond {
+	if s.lifecycleCond == nil {
+		s.lifecycleCond = sync.NewCond(&s.lifecycleMu)
+	}
+	return s.lifecycleCond
 }
 
 func buildRouteExecutionHandlers(
