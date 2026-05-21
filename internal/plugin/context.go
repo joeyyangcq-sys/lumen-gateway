@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/joey/lumen-gateway/internal/observability"
@@ -96,6 +97,29 @@ func RegisterTypedContext[T any](r *Registry, metadata Metadata, factory func(T)
 			return nil, err
 		}
 		return factory(cfg)
+	})
+}
+
+func RegisterTypedContextWithCloser[T any](
+	r *Registry,
+	metadata Metadata,
+	factory func(T) (ContextHandler, io.Closer, error),
+) error {
+	return RegisterContext(r, metadata, func(params any) (ContextHandler, error) {
+		var cfg T
+		if err := Decode(params, &cfg); err != nil {
+			return nil, err
+		}
+
+		handler, closer, err := factory(cfg)
+		if err != nil {
+			if closer != nil {
+				_ = closer.Close()
+			}
+			return nil, err
+		}
+		r.addCloser(closer)
+		return handler, nil
 	})
 }
 

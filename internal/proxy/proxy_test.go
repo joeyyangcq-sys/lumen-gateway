@@ -244,6 +244,59 @@ func TestHTTPProxyClassifiesUpstreamErrors(t *testing.T) {
 	}
 }
 
+func TestNewUpstreamRequestKeepsStreamingBodyUnread(t *testing.T) {
+	reqCtx := app.NewContext(0)
+	reqCtx.Request.SetMethod("POST")
+	reqCtx.Request.SetHost("client.example.com")
+	reqCtx.Request.URI().SetPath("/stream")
+
+	body := &countingReader{reader: strings.NewReader("stream-payload")}
+	reqCtx.Request.SetBodyStream(body, -1)
+
+	req, err := newUpstreamRequest(context.Background(), reqCtx, Target{
+		Scheme:  "http",
+		Address: "upstream.internal:80",
+	})
+	if err != nil {
+		t.Fatalf("newUpstreamRequest() error = %v", err)
+	}
+
+	if body.reads != 0 {
+		t.Fatalf("stream was read %d times while building request, want 0", body.reads)
+	}
+	if req.ContentLength != -1 {
+		t.Fatalf("ContentLength = %d, want -1", req.ContentLength)
+	}
+	if req.Body == nil {
+		t.Fatal("Body is nil, want streaming body")
+	}
+}
+
+func TestNewUpstreamRequestUsesStreamingContentLengthHeader(t *testing.T) {
+	reqCtx := app.NewContext(0)
+	reqCtx.Request.SetMethod("POST")
+	reqCtx.Request.SetHost("client.example.com")
+	reqCtx.Request.URI().SetPath("/stream")
+
+	body := &countingReader{reader: strings.NewReader("stream-payload")}
+	reqCtx.Request.SetBodyStream(body, len("stream-payload"))
+
+	req, err := newUpstreamRequest(context.Background(), reqCtx, Target{
+		Scheme:  "http",
+		Address: "upstream.internal:80",
+	})
+	if err != nil {
+		t.Fatalf("newUpstreamRequest() error = %v", err)
+	}
+
+	if body.reads != 0 {
+		t.Fatalf("stream was read %d times while building request, want 0", body.reads)
+	}
+	if req.ContentLength != int64(len("stream-payload")) {
+		t.Fatalf("ContentLength = %d, want %d", req.ContentLength, len("stream-payload"))
+	}
+}
+
 func newProxyTestContext(method string) *app.RequestContext {
 	reqCtx := app.NewContext(0)
 	reqCtx.Request.SetMethod(method)
@@ -261,6 +314,16 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
 	return f(r)
+}
+
+type countingReader struct {
+	reader io.Reader
+	reads  int
+}
+
+func (r *countingReader) Read(p []byte) (int, error) {
+	r.reads++
+	return r.reader.Read(p)
 }
 
 type delayedReadCloser struct {

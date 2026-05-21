@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -27,9 +28,13 @@ type accessLogConfig struct {
 }
 
 type accessLogWriter struct {
-	mu     sync.Mutex
-	file   *os.File
-	writer *bufio.Writer
+	mu       sync.Mutex
+	file     *os.File
+	writer   *bufio.Writer
+	stopCh   chan struct{}
+	doneCh   chan struct{}
+	stopOnce sync.Once
+	closed   bool
 }
 
 func newAccessLogWriter(path string, bufferSize int) (*accessLogWriter, error) {
@@ -46,41 +51,80 @@ func newAccessLogWriter(path string, bufferSize int) (*accessLogWriter, error) {
 	return &accessLogWriter{
 		file:   file,
 		writer: bufio.NewWriterSize(file, bufferSize),
+		stopCh: make(chan struct{}),
+		doneCh: make(chan struct{}),
 	}, nil
 }
 
-func (w *accessLogWriter) writeLine(line string) {
+func (w *accessLogWriter) writeLine(line string) error {
 	w.mu.Lock()
-	w.writer.WriteString(line)
-	w.writer.WriteByte('\n')
-	w.mu.Unlock()
+	defer w.mu.Unlock()
+	if w.closed {
+		return os.ErrClosed
+	}
+	if _, err := w.writer.WriteString(line); err != nil {
+		return err
+	}
+	return w.writer.WriteByte('\n')
 }
 
-func (w *accessLogWriter) flush() {
+func (w *accessLogWriter) flush() error {
 	w.mu.Lock()
-	w.writer.Flush()
-	w.mu.Unlock()
+	defer w.mu.Unlock()
+	if w.closed {
+		return os.ErrClosed
+	}
+	return w.writer.Flush()
 }
 
 func (w *accessLogWriter) startFlusher(interval time.Duration) {
 	go func() {
+		defer close(w.doneCh)
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
-		for range ticker.C {
-			w.flush()
+		for {
+			select {
+			case <-ticker.C:
+				_ = w.flush()
+			case <-w.stopCh:
+				return
+			}
 		}
 	}()
 }
 
+func (w *accessLogWriter) Close() error {
+	w.stopOnce.Do(func() {
+		close(w.stopCh)
+		<-w.doneCh
+	})
+
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.closed {
+		return nil
+	}
+	w.closed = true
+
+	var err error
+	if flushErr := w.writer.Flush(); flushErr != nil {
+		err = flushErr
+	}
+	if closeErr := w.file.Close(); err == nil {
+		err = closeErr
+	}
+	return err
+}
+
 func registerAccessLog(registry *plugin.Registry) error {
-	return plugin.RegisterTypedContext(registry, plugin.Metadata{
+	return plugin.RegisterTypedContextWithCloser(registry, plugin.Metadata{
 		Name:     "access_log",
 		Priority: -100,
 		Scopes:   plugin.AllScopes(),
-	}, func(cfg accessLogConfig) (plugin.ContextHandler, error) {
+	}, func(cfg accessLogConfig) (plugin.ContextHandler, io.Closer, error) {
 		path := strings.TrimSpace(cfg.Path)
 		if path == "" {
-			return nil, errors.New("access_log requires path")
+			return nil, nil, errors.New("access_log requires path")
 		}
 
 		format := cfg.Format
@@ -97,7 +141,7 @@ func registerAccessLog(registry *plugin.Registry) error {
 		if cfg.FlushInterval != "" {
 			parsed, err := time.ParseDuration(cfg.FlushInterval)
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			if parsed > 0 {
 				flushInterval = parsed
@@ -106,14 +150,14 @@ func registerAccessLog(registry *plugin.Registry) error {
 
 		w, err := newAccessLogWriter(path, bufferSize)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		w.startFlusher(flushInterval)
 
 		return func(ctx context.Context, pc plugin.PluginContext) {
 			pc.Next(ctx)
 			line := renderRequestTemplate(pc, format)
-			w.writeLine(line)
-		}, nil
+			_ = w.writeLine(line)
+		}, w, nil
 	})
 }

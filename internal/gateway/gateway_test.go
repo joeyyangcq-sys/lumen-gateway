@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/cloudwego/hertz/pkg/app"
@@ -29,14 +30,17 @@ func TestBuildSnapshotBuildsPluginChainsForAllScopes(t *testing.T) {
 	if len(snapshot.ServerHandlers) != 1 {
 		t.Fatalf("server handlers = %d, want 1", len(snapshot.ServerHandlers))
 	}
-	if len(snapshot.RouteHandlers["user-api"]) != 2 {
-		t.Fatalf("route handlers = %d, want 2", len(snapshot.RouteHandlers["user-api"]))
+	if len(snapshot.RouteHandlers["user-api"]) != 5 {
+		t.Fatalf("route handlers = %d, want prebuilt global/server/route/service chain", len(snapshot.RouteHandlers["user-api"]))
 	}
 	if len(snapshot.Services["user-service"].Handlers) != 2 {
 		t.Fatalf("service handlers = %d, want 2", len(snapshot.Services["user-service"].Handlers))
 	}
 	if len(snapshot.Upstreams["user-upstream"].Handlers) != 1 {
 		t.Fatalf("upstream handlers = %d, want 1", len(snapshot.Upstreams["user-upstream"].Handlers))
+	}
+	if len(snapshot.Services["user-service"].ExecutionHandlers) != 4 {
+		t.Fatalf("service execution handlers = %d, want prebuilt service/upstream/proxy chain", len(snapshot.Services["user-service"].ExecutionHandlers))
 	}
 }
 
@@ -72,6 +76,94 @@ func TestNewWithCompilerReturnsCompileError(t *testing.T) {
 	_, err := NewWithCompiler(gatewayOptions("127.0.0.1:9001"), compiler)
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("NewWithCompiler() error = %v, want %v", err, wantErr)
+	}
+}
+
+func TestReloadClosesPreviousSnapshotResources(t *testing.T) {
+	var closed atomic.Int32
+	compiler := NewRuntimeCompiler(WithRegistryFactory(func() (*plugin.Registry, error) {
+		registry := plugin.NewRegistry()
+		if err := plugin.RegisterTypedContextWithCloser[struct{}](registry, plugin.Metadata{
+			Name:     "closeable",
+			Priority: 0,
+			Scopes:   []plugin.Scope{plugin.ScopeGlobal},
+		}, func(struct{}) (plugin.ContextHandler, io.Closer, error) {
+			return func(ctx context.Context, pc plugin.PluginContext) {
+					pc.Next(ctx)
+				}, closeFunc(func() error {
+					closed.Add(1)
+					return nil
+				}), nil
+		}); err != nil {
+			return nil, err
+		}
+		return registry, nil
+	}))
+
+	options := gatewayOptions("127.0.0.1:9001")
+	options.GlobalPlugins = []config.PluginRef{{Name: "closeable"}}
+
+	gw, err := NewWithCompiler(options, compiler)
+	if err != nil {
+		t.Fatalf("NewWithCompiler() error = %v", err)
+	}
+
+	if err := gw.Reload(options); err != nil {
+		t.Fatalf("Reload() error = %v", err)
+	}
+	if got := closed.Load(); got != 1 {
+		t.Fatalf("closed resources after reload = %d, want 1", got)
+	}
+
+	if err := gw.Shutdown(); err != nil && !strings.Contains(err.Error(), "engine is not running") {
+		t.Fatalf("Shutdown() error = %v", err)
+	}
+	if got := closed.Load(); got != 2 {
+		t.Fatalf("closed resources after shutdown = %d, want 2", got)
+	}
+}
+
+func TestCompileClosesBuiltResourcesOnError(t *testing.T) {
+	var closed atomic.Int32
+	compiler := NewRuntimeCompiler(WithRegistryFactory(func() (*plugin.Registry, error) {
+		registry := plugin.NewRegistry()
+		if err := plugin.RegisterTypedContextWithCloser[struct{}](registry, plugin.Metadata{
+			Name:     "closeable",
+			Priority: 0,
+			Scopes:   []plugin.Scope{plugin.ScopeGlobal},
+		}, func(struct{}) (plugin.ContextHandler, io.Closer, error) {
+			return func(ctx context.Context, pc plugin.PluginContext) {
+					pc.Next(ctx)
+				}, closeFunc(func() error {
+					closed.Add(1)
+					return nil
+				}), nil
+		}); err != nil {
+			return nil, err
+		}
+		if err := plugin.RegisterTypedContext[struct{}](registry, plugin.Metadata{
+			Name:     "failing",
+			Priority: 0,
+			Scopes:   []plugin.Scope{plugin.ScopeGlobal},
+		}, func(struct{}) (plugin.ContextHandler, error) {
+			return nil, errors.New("boom")
+		}); err != nil {
+			return nil, err
+		}
+		return registry, nil
+	}))
+
+	options := gatewayOptions("127.0.0.1:9001")
+	options.GlobalPlugins = []config.PluginRef{
+		{Name: "closeable"},
+		{Name: "failing"},
+	}
+
+	if _, err := compiler.Compile(options); err == nil {
+		t.Fatal("Compile() error = nil, want error")
+	}
+	if got := closed.Load(); got != 1 {
+		t.Fatalf("closed resources after compile error = %d, want 1", got)
 	}
 }
 
@@ -522,6 +614,12 @@ type runtimeCompilerFunc func(config.Options) (*RuntimeSnapshot, error)
 
 func (f runtimeCompilerFunc) Compile(options config.Options) (*RuntimeSnapshot, error) {
 	return f(options)
+}
+
+type closeFunc func() error
+
+func (f closeFunc) Close() error {
+	return f()
 }
 
 func mustRegisterPlugin(t *testing.T, registry *plugin.Registry, metadata plugin.Metadata, name string) {

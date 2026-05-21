@@ -27,6 +27,8 @@ import (
 	"github.com/urfave/cli/v2"
 )
 
+const defaultShutdownTimeout = 5 * time.Second
+
 // WithPlugins adds one or more plugin registrars that run after the built-in
 // plugins are loaded. Each registrar receives the shared *plugin.Registry and
 // calls plugin.RegisterTypedContext (or r.Register) to add custom plugins.
@@ -304,13 +306,17 @@ func Run(opts ...Option) error {
 			case sig := <-sigCh:
 				slog.Info("shutdown signal received", "signal", sig.String())
 				cancel()
-				return gw.Shutdown()
+				shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), defaultShutdownTimeout)
+				defer shutdownCancel()
+				return gw.ShutdownContext(shutdownCtx)
 			case err := <-errCh:
 				if errors.Is(err, context.Canceled) {
 					return nil
 				}
 				cancel()
-				_ = gw.Shutdown()
+				shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), defaultShutdownTimeout)
+				_ = gw.ShutdownContext(shutdownCtx)
+				shutdownCancel()
 				return err
 			}
 		},

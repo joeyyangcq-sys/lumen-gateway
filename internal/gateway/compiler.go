@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"fmt"
+	"io"
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/joey/lumen-gateway/internal/balancer"
@@ -79,6 +80,12 @@ func (c *Compiler) Compile(options config.Options) (*RuntimeSnapshot, error) {
 	if err != nil {
 		return nil, err
 	}
+	compiled := false
+	defer func() {
+		if !compiled {
+			_ = registry.Close()
+		}
+	}()
 
 	globalHandlers, err := buildPluginHandlers(registry, options, plugin.ScopeGlobal, options.GlobalPlugins)
 	if err != nil {
@@ -148,6 +155,7 @@ func (c *Compiler) Compile(options config.Options) (*RuntimeSnapshot, error) {
 			Upstream: upstream,
 			Proxy:    serviceProxy,
 		}
+		services[id].ExecutionHandlers = buildServiceExecutionHandlers(services[id])
 	}
 
 	r := router.New()
@@ -161,9 +169,15 @@ func (c *Compiler) Compile(options config.Options) (*RuntimeSnapshot, error) {
 		if err != nil {
 			return nil, fmt.Errorf("route %q plugins: %w", id, err)
 		}
-		routeHandlers[id] = handlers
+		routeHandlers[id] = buildRouteExecutionHandlers(
+			globalHandlers,
+			serverHandlers,
+			handlers,
+			services[routeOptions.Service],
+		)
 	}
 
+	compiled = true
 	return &RuntimeSnapshot{
 		Router:         r,
 		GlobalHandlers: globalHandlers,
@@ -171,6 +185,7 @@ func (c *Compiler) Compile(options config.Options) (*RuntimeSnapshot, error) {
 		RouteHandlers:  routeHandlers,
 		Services:       services,
 		Upstreams:      upstreams,
+		closers:        []io.Closer{registry},
 	}, nil
 }
 

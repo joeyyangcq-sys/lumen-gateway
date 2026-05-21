@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"testing"
+	"time"
 
 	mvccpb "go.etcd.io/etcd/api/v3/mvccpb"
 	clientv3 "go.etcd.io/etcd/client/v3"
@@ -101,10 +102,60 @@ func TestEtcdApisixSourceWatchReloadsOnChanges(t *testing.T) {
 	}
 }
 
+func TestEtcdApisixSourceWatchRestartsAfterTemporaryWatchError(t *testing.T) {
+	firstWatch := make(chan clientv3.WatchResponse, 1)
+	secondWatch := make(chan clientv3.WatchResponse, 1)
+	source := &etcdApisixSource{
+		client: &fakeEtcdClient{
+			getResponses: []*clientv3.GetResponse{
+				{Kvs: []*mvccpb.KeyValue{
+					kv("/apisix/upstreams/1", `{"value":{"id":"1","nodes":{"127.0.0.1:9001":1}}}`),
+					kv("/apisix/services/1", `{"value":{"id":"1","upstream_id":"1"}}`),
+					kv("/apisix/routes/1", `{"value":{"id":"1","uri":"/v3/users","service_id":"1"}}`),
+				}},
+			},
+			watchChans: []chan clientv3.WatchResponse{firstWatch, secondWatch},
+		},
+		prefix:     "/apisix",
+		listen:     ":18080",
+		retryDelay: time.Millisecond,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	firstWatch <- clientv3.WatchResponse{Canceled: true}
+	secondWatch <- clientv3.WatchResponse{
+		Events: []*clientv3.Event{{Type: clientv3.EventTypePut}},
+	}
+
+	var gotErr bool
+	var got Update
+	err := source.Watch(ctx, func(update Update) {
+		if update.Err != nil {
+			gotErr = true
+			return
+		}
+		got = update
+		cancel()
+	})
+	if err != context.Canceled {
+		t.Fatalf("Watch() error = %v, want context.Canceled", err)
+	}
+	if !gotErr {
+		t.Fatal("watch error update not reported before retry")
+	}
+	if got.Options.Routes["1"].Paths[0] != "= /v3/users" {
+		t.Fatalf("route path = %#v, want = /v3/users after retry", got.Options.Routes["1"].Paths)
+	}
+}
+
 type fakeEtcdClient struct {
 	getResponses []*clientv3.GetResponse
 	watchCh      chan clientv3.WatchResponse
+	watchChans   []chan clientv3.WatchResponse
 	getCalls     int
+	watchCalls   int
 }
 
 func (c *fakeEtcdClient) Get(_ context.Context, _ string, _ ...clientv3.OpOption) (*clientv3.GetResponse, error) {
@@ -120,6 +171,14 @@ func (c *fakeEtcdClient) Get(_ context.Context, _ string, _ ...clientv3.OpOption
 }
 
 func (c *fakeEtcdClient) Watch(_ context.Context, _ string, _ ...clientv3.OpOption) clientv3.WatchChan {
+	if len(c.watchChans) > 0 {
+		idx := c.watchCalls
+		if idx >= len(c.watchChans) {
+			idx = len(c.watchChans) - 1
+		}
+		c.watchCalls++
+		return c.watchChans[idx]
+	}
 	if c.watchCh == nil {
 		c.watchCh = make(chan clientv3.WatchResponse)
 	}

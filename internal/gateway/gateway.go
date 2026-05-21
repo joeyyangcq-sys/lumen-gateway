@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -42,14 +43,16 @@ type RuntimeSnapshot struct {
 	RouteHandlers  map[string][]app.HandlerFunc
 	Services       map[string]*Service
 	Upstreams      map[string]*Upstream
+	closers        []io.Closer
 }
 
 type Service struct {
-	ID       string
-	Options  config.ServiceOptions
-	Handlers []app.HandlerFunc
-	Upstream *Upstream
-	Proxy    proxy.Proxy
+	ID                string
+	Options           config.ServiceOptions
+	Handlers          []app.HandlerFunc
+	ExecutionHandlers []app.HandlerFunc
+	Upstream          *Upstream
+	Proxy             proxy.Proxy
 }
 
 type Upstream struct {
@@ -135,10 +138,22 @@ func (g *Gateway) Run() error {
 }
 
 func (g *Gateway) Shutdown() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return g.ShutdownContext(ctx)
+}
+
+func (g *Gateway) ShutdownContext(ctx context.Context) error {
 	if g.server == nil {
 		return nil
 	}
-	return g.server.Shutdown(context.Background())
+	err := g.server.Shutdown(ctx)
+	if snapshot := g.snapshot.Swap(nil); snapshot != nil {
+		if closeErr := snapshot.Close(); err == nil {
+			err = closeErr
+		}
+	}
+	return err
 }
 
 func (g *Gateway) Reload(options config.Options) error {
@@ -150,7 +165,12 @@ func (g *Gateway) Reload(options config.Options) error {
 	if err != nil {
 		return err
 	}
-	g.snapshot.Store(snapshot)
+	old := g.snapshot.Swap(snapshot)
+	if old != nil {
+		if err := old.Close(); err != nil {
+			slog.Warn("failed to close old runtime snapshot", "error", err)
+		}
+	}
 	return nil
 }
 
@@ -202,53 +222,87 @@ func (g *Gateway) ServeHTTP(ctx context.Context, c *app.RequestContext) {
 	}
 	plugin.SetPhase(c, "request")
 
-	handlers := make([]app.HandlerFunc, 0)
-	handlers = append(handlers, snapshot.GlobalHandlers...)
-	handlers = append(handlers, snapshot.ServerHandlers...)
-	handlers = append(handlers, snapshot.RouteHandlers[route.ID]...)
-	handlers = append(handlers, func(nextCtx context.Context, next *app.RequestContext) {
-		service := snapshot.Services[route.Service]
-		if service == nil || service.Upstream == nil || service.Proxy == nil {
-			next.SetStatusCode(503)
-			return
-		}
-		plugin.SetUpstreamID(next, service.Upstream.ID)
-		serviceHandlers := make([]app.HandlerFunc, 0, len(service.Handlers)+len(service.Upstream.Handlers)+1)
-		serviceHandlers = append(serviceHandlers, service.Handlers...)
-		serviceHandlers = append(serviceHandlers, service.Upstream.Handlers...)
-		serviceHandlers = append(serviceHandlers, func(_ context.Context, terminal *app.RequestContext) {
-			endpoint, err := service.Upstream.Balancer.Pick(nextCtx)
-			if err != nil {
-				terminal.SetStatusCode(503)
-				return
-			}
-
-			target := resolveTarget(service, service.Upstream, endpoint, terminal)
-			plugin.SetEndpointAddress(terminal, endpoint.Address())
-			plugin.SetUpstreamHost(terminal, target.Host)
-			plugin.SetPhase(terminal, "proxy")
-			if err := service.Proxy.ServeHTTP(nextCtx, terminal, target); err != nil {
-				plugin.SetGatewayError(terminal, err)
-				switch {
-				case errors.Is(err, proxy.ErrTimeout):
-					terminal.SetStatusCode(504)
-				case errors.Is(err, proxy.ErrInvalidTarget):
-					terminal.SetStatusCode(502)
-				default:
-					terminal.SetStatusCode(502)
-				}
-			}
-			plugin.SetPhase(terminal, "response")
-		})
-		next.SetIndex(-1)
-		next.SetHandlers(serviceHandlers)
-		next.Next(nextCtx)
-	})
+	handlers := snapshot.RouteHandlers[route.ID]
+	if len(handlers) == 0 {
+		c.SetStatusCode(503)
+		return
+	}
 
 	c.SetIndex(-1)
 	c.SetHandlers(handlers)
 	c.Next(ctx)
 	c.Abort()
+}
+
+func (s *RuntimeSnapshot) Close() error {
+	if s == nil {
+		return nil
+	}
+	var err error
+	for i := len(s.closers) - 1; i >= 0; i-- {
+		if closeErr := s.closers[i].Close(); err == nil {
+			err = closeErr
+		}
+	}
+	s.closers = nil
+	return err
+}
+
+func buildRouteExecutionHandlers(
+	globalHandlers []app.HandlerFunc,
+	serverHandlers []app.HandlerFunc,
+	routeHandlers []app.HandlerFunc,
+	service *Service,
+) []app.HandlerFunc {
+	handlers := make([]app.HandlerFunc, 0, len(globalHandlers)+len(serverHandlers)+len(routeHandlers)+1)
+	handlers = append(handlers, globalHandlers...)
+	handlers = append(handlers, serverHandlers...)
+	handlers = append(handlers, routeHandlers...)
+	handlers = append(handlers, func(ctx context.Context, c *app.RequestContext) {
+		if service == nil || service.Upstream == nil || service.Proxy == nil {
+			c.SetStatusCode(503)
+			return
+		}
+		plugin.SetUpstreamID(c, service.Upstream.ID)
+		c.SetIndex(-1)
+		c.SetHandlers(service.ExecutionHandlers)
+		c.Next(ctx)
+	})
+	return handlers
+}
+
+func buildServiceExecutionHandlers(service *Service) []app.HandlerFunc {
+	if service == nil || service.Upstream == nil {
+		return nil
+	}
+	handlers := make([]app.HandlerFunc, 0, len(service.Handlers)+len(service.Upstream.Handlers)+1)
+	handlers = append(handlers, service.Handlers...)
+	handlers = append(handlers, service.Upstream.Handlers...)
+	handlers = append(handlers, func(ctx context.Context, c *app.RequestContext) {
+		endpoint, err := service.Upstream.Balancer.Pick(ctx)
+		if err != nil {
+			c.SetStatusCode(503)
+			return
+		}
+
+		target := resolveTarget(service, service.Upstream, endpoint, c)
+		plugin.SetEndpointAddress(c, endpoint.Address())
+		plugin.SetUpstreamHost(c, target.Host)
+		plugin.SetPhase(c, "proxy")
+		if err := service.Proxy.ServeHTTP(ctx, c, target); err != nil {
+			plugin.SetGatewayError(c, err)
+			switch {
+			case errors.Is(err, proxy.ErrTimeout):
+				c.SetStatusCode(504)
+			case errors.Is(err, proxy.ErrInvalidTarget):
+				c.SetStatusCode(502)
+			default:
+				c.SetStatusCode(502)
+			}
+		}
+		plugin.SetPhase(c, "response")
+	})
+	return handlers
 }
 
 func statusClass(status int) string {
