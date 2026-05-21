@@ -268,11 +268,37 @@ func TestServeHTTPExposesMetricsEndpoint(t *testing.T) {
 	if !strings.Contains(body, `lumen_plugin_executions_total{phase="request",plugin="request_transformer"`) {
 		t.Fatalf("metrics body missing plugin execution metric:\n%s", body)
 	}
+	if !strings.Contains(body, `lumen_gateway_requests_total{handler="proxy",method="GET",route_id="user-api",status_class="2xx"} 1`) {
+		t.Fatalf("metrics body missing gateway request metric:\n%s", body)
+	}
 	if !strings.Contains(body, `lumen_upstream_requests_total`) {
 		t.Fatalf("metrics body missing upstream request metric:\n%s", body)
 	}
 	if !strings.Contains(body, `phase="total"`) {
 		t.Fatalf("metrics body missing upstream total phase metric:\n%s", body)
+	}
+}
+
+func TestServeHTTPRecordsUnmatchedRequestMetrics(t *testing.T) {
+	previous := observability.Default()
+	recorder := observability.NewMemoryRecorder()
+	observability.SetDefault(recorder)
+	defer observability.SetDefault(previous)
+
+	gw, err := New(gatewayOptions("127.0.0.1:9001"))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	c := app.NewContext(0)
+	c.Request.SetMethod("GET")
+	c.Request.URI().SetPath("/missing")
+
+	gw.ServeHTTP(context.Background(), c)
+
+	metrics := recorder.RenderPrometheus()
+	if !strings.Contains(metrics, `lumen_gateway_requests_total{handler="unmatched",method="GET",status_class="4xx"} 1`) {
+		t.Fatalf("metrics missing unmatched request:\n%s", metrics)
 	}
 }
 

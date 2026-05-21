@@ -82,6 +82,40 @@ func TestValidateRejectsRewritePassHostWithoutUpstreamHost(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsUnsupportedLoggingOptions(t *testing.T) {
+	tests := []struct {
+		name    string
+		logging LoggingOptions
+		want    string
+	}{
+		{
+			name:    "level",
+			logging: LoggingOptions{Level: "trace"},
+			want:    `logging.level "trace" is not supported`,
+		},
+		{
+			name:    "format",
+			logging: LoggingOptions{Format: "xml"},
+			want:    `logging.format "xml" is not supported`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			options := minimalOptions()
+			options.Logging = tt.logging
+
+			err := options.Validate()
+			if err == nil {
+				t.Fatal("Validate() error = nil, want logging validation error")
+			}
+			if err.Error() != tt.want {
+				t.Fatalf("Validate() error = %q, want %q", err.Error(), tt.want)
+			}
+		})
+	}
+}
+
 func minimalOptions() Options {
 	return Options{
 		Servers: map[string]ServerOptions{

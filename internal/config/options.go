@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -152,6 +153,10 @@ func (o Options) Validate() error {
 		return errors.New("at least one server is required")
 	}
 
+	if err := o.Logging.Validate(); err != nil {
+		return err
+	}
+
 	for id, server := range o.Servers {
 		if server.Listen == "" {
 			return fmt.Errorf("server %q listen cannot be empty", id)
@@ -220,6 +225,22 @@ func (o Options) Validate() error {
 		if err := o.validatePluginRefs("upstream "+id, upstream.Plugins); err != nil {
 			return err
 		}
+	}
+
+	return nil
+}
+
+func (o LoggingOptions) Validate() error {
+	switch strings.ToLower(strings.TrimSpace(o.Level)) {
+	case "", "debug", "info", "warn", "warning", "error":
+	default:
+		return fmt.Errorf("logging.level %q is not supported", o.Level)
+	}
+
+	switch strings.ToLower(strings.TrimSpace(o.Format)) {
+	case "", "text", "json":
+	default:
+		return fmt.Errorf("logging.format %q is not supported", o.Format)
 	}
 
 	return nil

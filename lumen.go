@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	publicbalancer "github.com/joey/lumen-gateway/balancer"
 	"github.com/joey/lumen-gateway/internal/adminapi"
 	internalbalancer "github.com/joey/lumen-gateway/internal/balancer"
 	"github.com/joey/lumen-gateway/internal/balancer/roundrobin"
@@ -18,10 +19,10 @@ import (
 	"github.com/joey/lumen-gateway/internal/config"
 	"github.com/joey/lumen-gateway/internal/controlplane"
 	"github.com/joey/lumen-gateway/internal/gateway"
+	internallogging "github.com/joey/lumen-gateway/internal/logging"
 	internalplugin "github.com/joey/lumen-gateway/internal/plugin"
 	"github.com/joey/lumen-gateway/internal/plugin/builtin"
 	"github.com/joey/lumen-gateway/internal/provider"
-	publicbalancer "github.com/joey/lumen-gateway/balancer"
 	publicplugin "github.com/joey/lumen-gateway/plugin"
 	"github.com/urfave/cli/v2"
 )
@@ -231,6 +232,17 @@ func Run(opts ...Option) error {
 			if err != nil {
 				return err
 			}
+			if err := internallogging.Configure(initial.Logging); err != nil {
+				return err
+			}
+			slog.Info("loaded gateway configuration",
+				"config", configPath,
+				"source", boot.Gateway.Source,
+				"servers", len(initial.Servers),
+				"routes", len(initial.Routes),
+				"services", len(initial.Services),
+				"upstreams", len(initial.Upstreams),
+			)
 
 			compiler := gateway.NewRuntimeCompiler(opt.buildCompilerOpts()...)
 			if adminHandler != nil {
@@ -270,7 +282,17 @@ func Run(opts ...Option) error {
 					}
 					if err := gw.Reload(next.Options); err != nil {
 						slog.Warn("skip invalid gateway reload", "error", err)
+						return
 					}
+					if err := internallogging.Configure(next.Options.Logging); err != nil {
+						slog.Warn("skip invalid logging configuration", "error", err)
+						return
+					}
+					slog.Info("reloaded gateway configuration",
+						"routes", len(next.Options.Routes),
+						"services", len(next.Options.Services),
+						"upstreams", len(next.Options.Upstreams),
+					)
 				})
 			}()
 

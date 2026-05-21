@@ -245,6 +245,7 @@ Runtime metrics are exposed at:
 
 Current metrics include:
 
+- gateway request counts and durations by bounded handler, method, route ID, and status class
 - plugin execution counts and durations
 - upstream request counts
 - upstream phase timings

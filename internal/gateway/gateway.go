@@ -115,8 +115,14 @@ func NewWithCompiler(options config.Options, compiler RuntimeCompiler, adminHand
 
 	// Health check endpoint — used by Docker and load balancers.
 	h.GET("/health", func(_ context.Context, c *app.RequestContext) {
+		startedAt := time.Now()
 		c.Response.SetStatusCode(200)
 		c.Response.SetBodyRaw([]byte("ok"))
+		observability.Default().ObserveGateway(observability.GatewayLabels{
+			Handler:     "health",
+			Method:      string(c.Method()),
+			StatusClass: statusClass(c.Response.StatusCode()),
+		}, time.Since(startedAt))
 	})
 	h.Any("/*path", gw.ServeHTTP)
 	return gw, nil
@@ -149,10 +155,24 @@ func (g *Gateway) Reload(options config.Options) error {
 }
 
 func (g *Gateway) ServeHTTP(ctx context.Context, c *app.RequestContext) {
+	startedAt := time.Now()
+	handler := "unmatched"
+	routeID := ""
+	defer func() {
+		observability.Default().ObserveGateway(observability.GatewayLabels{
+			Handler:     handler,
+			Method:      string(c.Method()),
+			RouteID:     routeID,
+			StatusClass: statusClass(c.Response.StatusCode()),
+		}, time.Since(startedAt))
+	}()
+
 	if g.admin != nil && g.admin.ServeHTTP(ctx, c) {
+		handler = "admin"
 		return
 	}
 	if string(c.Path()) == "/metrics" {
+		handler = "metrics"
 		c.Response.Header.Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 		c.Response.SetStatusCode(200)
 		lumenMetrics := observability.Default().RenderPrometheus()
@@ -163,6 +183,7 @@ func (g *Gateway) ServeHTTP(ctx context.Context, c *app.RequestContext) {
 
 	snapshot := g.snapshot.Load()
 	if snapshot == nil || snapshot.Router == nil {
+		handler = "unavailable"
 		c.SetStatusCode(503)
 		return
 	}
@@ -172,6 +193,8 @@ func (g *Gateway) ServeHTTP(ctx context.Context, c *app.RequestContext) {
 		c.SetStatusCode(404)
 		return
 	}
+	handler = "proxy"
+	routeID = route.ID
 	plugin.SetRouteID(c, route.ID)
 	plugin.SetServiceID(c, route.Service)
 	if service := snapshot.Services[route.Service]; service != nil && service.Upstream != nil {
@@ -226,6 +249,13 @@ func (g *Gateway) ServeHTTP(ctx context.Context, c *app.RequestContext) {
 	c.SetHandlers(handlers)
 	c.Next(ctx)
 	c.Abort()
+}
+
+func statusClass(status int) string {
+	if status <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("%dxx", status/100)
 }
 
 func BuildSnapshot(options config.Options) (*RuntimeSnapshot, error) {
