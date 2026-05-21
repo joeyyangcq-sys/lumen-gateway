@@ -11,6 +11,8 @@
 package plugin
 
 import (
+	"io"
+
 	"github.com/cloudwego/hertz/pkg/app"
 	internalplugin "github.com/joey/lumen-gateway/internal/plugin"
 )
@@ -81,8 +83,17 @@ func RegisterTypedContext[T any](r *Registry, meta Metadata, factory func(T) (Co
 	return internalplugin.RegisterTypedContext[T](r, meta, factory)
 }
 
-// RegisterTyped registers a plugin whose factory returns a raw handler func.
-// Prefer RegisterTypedContext for new plugins.
+// RegisterTypedContextWithCloser registers a plugin that owns a resource
+// tied to the compiled gateway snapshot. The closer is called when that
+// snapshot is replaced or shut down.
+func RegisterTypedContextWithCloser[T any](
+	r *Registry,
+	meta Metadata,
+	factory func(T) (ContextHandler, io.Closer, error),
+) error {
+	return internalplugin.RegisterTypedContextWithCloser[T](r, meta, factory)
+}
+
 // RegisterTyped registers a plugin whose factory returns a raw HandlerFunc.
 // Prefer RegisterTypedContext for new plugins.
 func RegisterTyped[T any](r *Registry, meta Metadata, factory func(T) (HandlerFunc, error)) error {

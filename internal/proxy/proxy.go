@@ -152,10 +152,17 @@ func newUpstreamRequest(ctx context.Context, c *app.RequestContext, target Targe
 	}
 
 	body := io.Reader(nil)
+	contentLength := int64(0)
 	if c.Request.IsBodyStream() {
 		body = c.Request.BodyStream()
+		if length := c.Request.Header.ContentLength(); length >= 0 {
+			contentLength = int64(length)
+		} else {
+			contentLength = -1
+		}
 	} else if raw := c.Request.Body(); len(raw) > 0 {
 		body = bytes.NewReader(raw)
+		contentLength = int64(len(raw))
 	}
 
 	req, err := http.NewRequestWithContext(ctx, string(c.Method()), uri.String(), body)
@@ -176,7 +183,7 @@ func newUpstreamRequest(ctx context.Context, c *app.RequestContext, target Targe
 	})
 
 	if req.Body != nil {
-		req.ContentLength = int64(len(c.Request.Body()))
+		req.ContentLength = contentLength
 	}
 	return req, nil
 }

@@ -6,8 +6,11 @@ const GATEWAYS = {
 export const BASE_URL = GATEWAYS[__ENV.GATEWAY] || GATEWAYS.lumen;
 export const GATEWAY_NAME = __ENV.GATEWAY || 'lumen';
 
-export const SUMMARY_TREND_STATS = ['avg', 'min', 'max', 'p(50)', 'p(75)', 'p(95)', 'p(99)', 'count'];
+export const SUMMARY_TREND_STATS = ['avg', 'min', 'max', 'p(50)', 'p(75)', 'p(90)', 'p(95)', 'p(99)', 'count'];
 
-export const STANDARD_RATE = 2000;
-export const STANDARD_DURATION = '30s';
-export const STANDARD_VUS = 200;
+// Standard thresholds for constant-load scenarios (100 VUs / 60s).
+// Spike and ramp-up scripts override these with looser bounds.
+export const COMMON_THRESHOLDS = {
+    http_req_failed: ['rate<0.01'],    // < 1% errors
+    http_req_duration: ['p(99)<1000'], // P99 under 1000 ms at 300 VUs
+};

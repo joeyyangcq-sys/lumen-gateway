@@ -9,6 +9,13 @@ import (
 func TestMemoryRecorderRendersPluginAndUpstreamMetrics(t *testing.T) {
 	recorder := NewMemoryRecorder()
 
+	recorder.ObserveGateway(GatewayLabels{
+		Handler:     "proxy",
+		Method:      "GET",
+		RouteID:     "route-a",
+		StatusClass: "2xx",
+	}, 33*time.Millisecond)
+
 	recorder.ObservePlugin(PluginLabels{
 		Plugin:     "request_transformer",
 		Scope:      "route",
@@ -40,6 +47,12 @@ func TestMemoryRecorderRendersPluginAndUpstreamMetrics(t *testing.T) {
 	})
 
 	metrics := recorder.RenderPrometheus()
+	if !strings.Contains(metrics, `lumen_gateway_requests_total{handler="proxy",method="GET",route_id="route-a",status_class="2xx"} 1`) {
+		t.Fatalf("gateway requests metric missing:\n%s", metrics)
+	}
+	if !strings.Contains(metrics, `lumen_gateway_request_duration_seconds_count{handler="proxy",method="GET",route_id="route-a",status_class="2xx"} 1`) {
+		t.Fatalf("gateway duration metric missing:\n%s", metrics)
+	}
 	if !strings.Contains(metrics, `lumen_plugin_executions_total{phase="request",plugin="request_transformer"`) {
 		t.Fatalf("plugin executions metric missing:\n%s", metrics)
 	}

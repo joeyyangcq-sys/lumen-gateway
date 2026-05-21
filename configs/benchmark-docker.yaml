@@ -3,11 +3,32 @@ servers:
     listen: ":18080"
 
 routes:
+  # Pure-proxy route — no plugins. Used by the passthrough scenario to measure
+  # baseline overhead with no plugin execution cost.
   bench-echo:
     methods: ["GET", "POST"]
     paths:
       - "/benchmark/echo"
     service: bench-service
+
+  # Plugin-stack route — matches the APISIX pipeline config (request_id plugin +
+  # buffered access_log). Used by pipeline / ramp-up / spike scenarios.
+  bench-pipeline:
+    methods: ["GET", "POST"]
+    paths:
+      - "/benchmark/pipeline"
+    service: bench-service
+    plugins:
+      - name: request_id
+        params:
+          algorithm: uuid
+          include_in_response: true
+      - name: access_log
+        params:
+          path: "logs/access.log"
+          format: '$remote_addr - [$time_local] "$request_method $request_uri" $status $body_bytes_sent $request_time'
+          buffer_size: 16384
+          flush_interval: "1s"
 
   health-check:
     methods: ["GET"]
@@ -37,11 +58,3 @@ upstreams:
     endpoints:
       - address: "mock-server:9001"
         weight: 1
-
-global_plugins:
-  - name: access_log
-    params:
-      path: "logs/access.log"
-      format: '$remote_addr - [$time_local] "$request_method $request_uri" $status $body_bytes_sent $request_time'
-      buffer_size: 16384
-      flush_interval: "1s"

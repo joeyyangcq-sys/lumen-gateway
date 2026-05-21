@@ -79,6 +79,12 @@ func (c *Compiler) Compile(options config.Options) (*RuntimeSnapshot, error) {
 	if err != nil {
 		return nil, err
 	}
+	compiled := false
+	defer func() {
+		if !compiled {
+			_ = registry.Close()
+		}
+	}()
 
 	globalHandlers, err := buildPluginHandlers(registry, options, plugin.ScopeGlobal, options.GlobalPlugins)
 	if err != nil {
@@ -148,6 +154,7 @@ func (c *Compiler) Compile(options config.Options) (*RuntimeSnapshot, error) {
 			Upstream: upstream,
 			Proxy:    serviceProxy,
 		}
+		services[id].ExecutionHandlers = buildServiceExecutionHandlers(services[id])
 	}
 
 	r := router.New()
@@ -161,17 +168,23 @@ func (c *Compiler) Compile(options config.Options) (*RuntimeSnapshot, error) {
 		if err != nil {
 			return nil, fmt.Errorf("route %q plugins: %w", id, err)
 		}
-		routeHandlers[id] = handlers
+		routeHandlers[id] = buildRouteExecutionHandlers(
+			globalHandlers,
+			serverHandlers,
+			handlers,
+			services[routeOptions.Service],
+		)
 	}
 
-	return &RuntimeSnapshot{
-		Router:         r,
-		GlobalHandlers: globalHandlers,
-		ServerHandlers: serverHandlers,
-		RouteHandlers:  routeHandlers,
-		Services:       services,
-		Upstreams:      upstreams,
-	}, nil
+	compiled = true
+	snapshot := newRuntimeSnapshot(registry)
+	snapshot.Router = r
+	snapshot.GlobalHandlers = globalHandlers
+	snapshot.ServerHandlers = serverHandlers
+	snapshot.RouteHandlers = routeHandlers
+	snapshot.Services = services
+	snapshot.Upstreams = upstreams
+	return snapshot, nil
 }
 
 func defaultRegistryFactory() (*plugin.Registry, error) {

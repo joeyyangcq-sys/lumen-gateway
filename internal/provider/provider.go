@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"path"
 	"strings"
+	"time"
 
 	clientv3 "go.etcd.io/etcd/client/v3"
 
@@ -66,9 +67,10 @@ type etcdKVClient interface {
 }
 
 type etcdApisixSource struct {
-	client etcdKVClient
-	prefix string
-	listen string
+	client     etcdKVClient
+	prefix     string
+	listen     string
+	retryDelay time.Duration
 }
 
 func newEtcdApisixSource(boot bootstrap.Options) (Source, error) {
@@ -100,39 +102,74 @@ func (s *etcdApisixSource) Load(ctx context.Context) (config.Options, error) {
 
 func (s *etcdApisixSource) Watch(ctx context.Context, onUpdate func(Update)) error {
 	watchPath := s.resourceRoot()
-	watchCh := s.client.Watch(ctx, watchPath, clientv3.WithPrefix())
-
 	for {
+		watchCh := s.client.Watch(ctx, watchPath, clientv3.WithPrefix())
+		for {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case resp, ok := <-watchCh:
+				if !ok {
+					if err := sleepContext(ctx, s.watchRetryDelay()); err != nil {
+						return err
+					}
+					goto restart
+				}
+				if err := resp.Err(); err != nil {
+					if onUpdate != nil {
+						onUpdate(Update{Err: err})
+					}
+					if err := sleepContext(ctx, s.watchRetryDelay()); err != nil {
+						return err
+					}
+					goto restart
+				}
+				if len(resp.Events) == 0 {
+					continue
+				}
+
+				options, err := s.Load(ctx)
+				if onUpdate == nil {
+					if err != nil {
+						return err
+					}
+					continue
+				}
+				if err != nil {
+					onUpdate(Update{Err: err})
+					continue
+				}
+				onUpdate(Update{Options: options})
+			}
+		}
+	restart:
+		continue
+	}
+}
+
+func (s *etcdApisixSource) watchRetryDelay() time.Duration {
+	if s.retryDelay > 0 {
+		return s.retryDelay
+	}
+	return time.Second
+}
+
+func sleepContext(ctx context.Context, delay time.Duration) error {
+	if delay <= 0 {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case resp, ok := <-watchCh:
-			if !ok {
-				return context.Canceled
-			}
-			if err := resp.Err(); err != nil {
-				if onUpdate != nil {
-					onUpdate(Update{Err: err})
-				}
-				return err
-			}
-			if len(resp.Events) == 0 {
-				continue
-			}
-
-			options, err := s.Load(ctx)
-			if onUpdate == nil {
-				if err != nil {
-					return err
-				}
-				continue
-			}
-			if err != nil {
-				onUpdate(Update{Err: err})
-				continue
-			}
-			onUpdate(Update{Options: options})
+		default:
+			return nil
 		}
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
 	}
 }
 

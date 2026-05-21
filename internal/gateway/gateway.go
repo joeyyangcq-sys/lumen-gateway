@@ -5,10 +5,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"slices"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -42,14 +44,31 @@ type RuntimeSnapshot struct {
 	RouteHandlers  map[string][]app.HandlerFunc
 	Services       map[string]*Service
 	Upstreams      map[string]*Upstream
+	closers        []io.Closer
+
+	inFlight  atomic.Int64 // requests currently holding this snapshot
+	draining  atomic.Bool  // true once Close() starts; acquire() rejects new requests
+	drainedCh chan struct{} // closed when inFlight reaches 0 while draining
+	drainOnce sync.Once    // ensures drainedCh is closed exactly once
+	closedCh  chan struct{} // closed when all resources have been released
+	closeOnce sync.Once    // ensures closedCh is closed exactly once
+}
+
+func newRuntimeSnapshot(closers ...io.Closer) *RuntimeSnapshot {
+	return &RuntimeSnapshot{
+		closers:   closers,
+		drainedCh: make(chan struct{}),
+		closedCh:  make(chan struct{}),
+	}
 }
 
 type Service struct {
-	ID       string
-	Options  config.ServiceOptions
-	Handlers []app.HandlerFunc
-	Upstream *Upstream
-	Proxy    proxy.Proxy
+	ID                string
+	Options           config.ServiceOptions
+	Handlers          []app.HandlerFunc
+	ExecutionHandlers []app.HandlerFunc
+	Upstream          *Upstream
+	Proxy             proxy.Proxy
 }
 
 type Upstream struct {
@@ -115,8 +134,14 @@ func NewWithCompiler(options config.Options, compiler RuntimeCompiler, adminHand
 
 	// Health check endpoint — used by Docker and load balancers.
 	h.GET("/health", func(_ context.Context, c *app.RequestContext) {
+		startedAt := time.Now()
 		c.Response.SetStatusCode(200)
 		c.Response.SetBodyRaw([]byte("ok"))
+		observability.Default().ObserveGateway(observability.GatewayLabels{
+			Handler:     "health",
+			Method:      string(c.Method()),
+			StatusClass: statusClass(c.Response.StatusCode()),
+		}, time.Since(startedAt))
 	})
 	h.Any("/*path", gw.ServeHTTP)
 	return gw, nil
@@ -129,10 +154,22 @@ func (g *Gateway) Run() error {
 }
 
 func (g *Gateway) Shutdown() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return g.ShutdownContext(ctx)
+}
+
+func (g *Gateway) ShutdownContext(ctx context.Context) error {
 	if g.server == nil {
 		return nil
 	}
-	return g.server.Shutdown(context.Background())
+	err := g.server.Shutdown(ctx)
+	if snapshot := g.snapshot.Swap(nil); snapshot != nil {
+		if closeErr := snapshot.Close(); err == nil {
+			err = closeErr
+		}
+	}
+	return err
 }
 
 func (g *Gateway) Reload(options config.Options) error {
@@ -144,15 +181,34 @@ func (g *Gateway) Reload(options config.Options) error {
 	if err != nil {
 		return err
 	}
-	g.snapshot.Store(snapshot)
+	old := g.snapshot.Swap(snapshot)
+	if old != nil {
+		if err := old.Close(); err != nil {
+			slog.Warn("failed to close old runtime snapshot", "error", err)
+		}
+	}
 	return nil
 }
 
 func (g *Gateway) ServeHTTP(ctx context.Context, c *app.RequestContext) {
+	startedAt := time.Now()
+	handler := "unmatched"
+	routeID := ""
+	defer func() {
+		observability.Default().ObserveGateway(observability.GatewayLabels{
+			Handler:     handler,
+			Method:      string(c.Method()),
+			RouteID:     routeID,
+			StatusClass: statusClass(c.Response.StatusCode()),
+		}, time.Since(startedAt))
+	}()
+
 	if g.admin != nil && g.admin.ServeHTTP(ctx, c) {
+		handler = "admin"
 		return
 	}
 	if string(c.Path()) == "/metrics" {
+		handler = "metrics"
 		c.Response.Header.Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 		c.Response.SetStatusCode(200)
 		lumenMetrics := observability.Default().RenderPrometheus()
@@ -161,10 +217,18 @@ func (g *Gateway) ServeHTTP(ctx context.Context, c *app.RequestContext) {
 		return
 	}
 
-	snapshot := g.snapshot.Load()
-	if snapshot == nil || snapshot.Router == nil {
-		c.SetStatusCode(503)
-		return
+	var snapshot *RuntimeSnapshot
+	for {
+		snapshot = g.snapshot.Load()
+		if snapshot == nil || snapshot.Router == nil {
+			handler = "unavailable"
+			c.SetStatusCode(503)
+			return
+		}
+		if snapshot.acquire() {
+			defer snapshot.release()
+			break
+		}
 	}
 
 	route, ok := snapshot.Router.Match(string(c.Method()), string(c.Host()), string(c.Path()))
@@ -172,6 +236,8 @@ func (g *Gateway) ServeHTTP(ctx context.Context, c *app.RequestContext) {
 		c.SetStatusCode(404)
 		return
 	}
+	handler = "proxy"
+	routeID = route.ID
 	plugin.SetRouteID(c, route.ID)
 	plugin.SetServiceID(c, route.Service)
 	if service := snapshot.Services[route.Service]; service != nil && service.Upstream != nil {
@@ -179,53 +245,132 @@ func (g *Gateway) ServeHTTP(ctx context.Context, c *app.RequestContext) {
 	}
 	plugin.SetPhase(c, "request")
 
-	handlers := make([]app.HandlerFunc, 0)
-	handlers = append(handlers, snapshot.GlobalHandlers...)
-	handlers = append(handlers, snapshot.ServerHandlers...)
-	handlers = append(handlers, snapshot.RouteHandlers[route.ID]...)
-	handlers = append(handlers, func(nextCtx context.Context, next *app.RequestContext) {
-		service := snapshot.Services[route.Service]
-		if service == nil || service.Upstream == nil || service.Proxy == nil {
-			next.SetStatusCode(503)
-			return
-		}
-		plugin.SetUpstreamID(next, service.Upstream.ID)
-		serviceHandlers := make([]app.HandlerFunc, 0, len(service.Handlers)+len(service.Upstream.Handlers)+1)
-		serviceHandlers = append(serviceHandlers, service.Handlers...)
-		serviceHandlers = append(serviceHandlers, service.Upstream.Handlers...)
-		serviceHandlers = append(serviceHandlers, func(_ context.Context, terminal *app.RequestContext) {
-			endpoint, err := service.Upstream.Balancer.Pick(nextCtx)
-			if err != nil {
-				terminal.SetStatusCode(503)
-				return
-			}
-
-			target := resolveTarget(service, service.Upstream, endpoint, terminal)
-			plugin.SetEndpointAddress(terminal, endpoint.Address())
-			plugin.SetUpstreamHost(terminal, target.Host)
-			plugin.SetPhase(terminal, "proxy")
-			if err := service.Proxy.ServeHTTP(nextCtx, terminal, target); err != nil {
-				plugin.SetGatewayError(terminal, err)
-				switch {
-				case errors.Is(err, proxy.ErrTimeout):
-					terminal.SetStatusCode(504)
-				case errors.Is(err, proxy.ErrInvalidTarget):
-					terminal.SetStatusCode(502)
-				default:
-					terminal.SetStatusCode(502)
-				}
-			}
-			plugin.SetPhase(terminal, "response")
-		})
-		next.SetIndex(-1)
-		next.SetHandlers(serviceHandlers)
-		next.Next(nextCtx)
-	})
+	handlers := snapshot.RouteHandlers[route.ID]
+	if len(handlers) == 0 {
+		c.SetStatusCode(503)
+		return
+	}
 
 	c.SetIndex(-1)
 	c.SetHandlers(handlers)
 	c.Next(ctx)
 	c.Abort()
+}
+
+func (s *RuntimeSnapshot) Close() error {
+	if s == nil {
+		return nil
+	}
+	if !s.draining.CompareAndSwap(false, true) {
+		// Another goroutine is already closing; wait for it to finish.
+		<-s.closedCh
+		return nil
+	}
+	// If no requests are in flight at this instant, signal drain immediately.
+	// Any acquire() that raced past the draining check above will see
+	// draining==true in its double-check and undo its increment, so the
+	// snapshot is never used after this point.
+	if s.inFlight.Load() == 0 {
+		s.drainOnce.Do(func() { close(s.drainedCh) })
+	}
+	<-s.drainedCh
+
+	var err error
+	for i := len(s.closers) - 1; i >= 0; i-- {
+		if closeErr := s.closers[i].Close(); err == nil {
+			err = closeErr
+		}
+	}
+	s.closers = nil
+
+	s.closeOnce.Do(func() { close(s.closedCh) })
+	return err
+}
+
+func (s *RuntimeSnapshot) acquire() bool {
+	if s.draining.Load() {
+		return false
+	}
+	s.inFlight.Add(1)
+	// Double-check: if Close() raced between the two draining reads above,
+	// undo the increment and wake Close() if we decremented to zero.
+	if s.draining.Load() {
+		if s.inFlight.Add(-1) == 0 {
+			s.drainOnce.Do(func() { close(s.drainedCh) })
+		}
+		return false
+	}
+	return true
+}
+
+func (s *RuntimeSnapshot) release() {
+	if s.inFlight.Add(-1) == 0 && s.draining.Load() {
+		s.drainOnce.Do(func() { close(s.drainedCh) })
+	}
+}
+
+func buildRouteExecutionHandlers(
+	globalHandlers []app.HandlerFunc,
+	serverHandlers []app.HandlerFunc,
+	routeHandlers []app.HandlerFunc,
+	service *Service,
+) []app.HandlerFunc {
+	handlers := make([]app.HandlerFunc, 0, len(globalHandlers)+len(serverHandlers)+len(routeHandlers)+1)
+	handlers = append(handlers, globalHandlers...)
+	handlers = append(handlers, serverHandlers...)
+	handlers = append(handlers, routeHandlers...)
+	handlers = append(handlers, func(ctx context.Context, c *app.RequestContext) {
+		if service == nil || service.Upstream == nil || service.Proxy == nil {
+			c.SetStatusCode(503)
+			return
+		}
+		plugin.SetUpstreamID(c, service.Upstream.ID)
+		c.SetIndex(-1)
+		c.SetHandlers(service.ExecutionHandlers)
+		c.Next(ctx)
+	})
+	return handlers
+}
+
+func buildServiceExecutionHandlers(service *Service) []app.HandlerFunc {
+	if service == nil || service.Upstream == nil {
+		return nil
+	}
+	handlers := make([]app.HandlerFunc, 0, len(service.Handlers)+len(service.Upstream.Handlers)+1)
+	handlers = append(handlers, service.Handlers...)
+	handlers = append(handlers, service.Upstream.Handlers...)
+	handlers = append(handlers, func(ctx context.Context, c *app.RequestContext) {
+		endpoint, err := service.Upstream.Balancer.Pick(ctx)
+		if err != nil {
+			c.SetStatusCode(503)
+			return
+		}
+
+		target := resolveTarget(service, service.Upstream, endpoint, c)
+		plugin.SetEndpointAddress(c, endpoint.Address())
+		plugin.SetUpstreamHost(c, target.Host)
+		plugin.SetPhase(c, "proxy")
+		if err := service.Proxy.ServeHTTP(ctx, c, target); err != nil {
+			plugin.SetGatewayError(c, err)
+			switch {
+			case errors.Is(err, proxy.ErrTimeout):
+				c.SetStatusCode(504)
+			case errors.Is(err, proxy.ErrInvalidTarget):
+				c.SetStatusCode(502)
+			default:
+				c.SetStatusCode(502)
+			}
+		}
+		plugin.SetPhase(c, "response")
+	})
+	return handlers
+}
+
+func statusClass(status int) string {
+	if status <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("%dxx", status/100)
 }
 
 func BuildSnapshot(options config.Options) (*RuntimeSnapshot, error) {

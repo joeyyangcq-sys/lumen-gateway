@@ -1,0 +1,32 @@
+apisix:
+  node_listen: 9080
+  enable_ipv6: false
+
+deployment:
+  role: traditional
+  role_traditional:
+    config_provider: etcd
+  admin:
+    admin_listen:
+      port: 9180
+    allow_admin:
+      - 0.0.0.0/0
+    admin_key:
+      - name: admin
+        key: benchmark-admin-key
+        role: admin
+  etcd:
+    host:
+      - "http://apisix-etcd:2379"
+    prefix: "/apisix"
+    timeout: 30
+
+nginx_config:
+  error_log_level: warn
+  # Use a separate log file for buffered access_log to avoid conflicting
+  # with the default access.log already defined in APISIX's nginx template.
+  # This gives APISIX buffered write semantics matching Lumen's access_log plugin
+  # (buffer_size=16384, flush_interval=1s).
+  http_server_configuration_snippet: |
+    access_log off;
+    access_log /usr/local/apisix/logs/bench-access.log combined buffer=16384 flush=1s;

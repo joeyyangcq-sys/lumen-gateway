@@ -30,6 +30,13 @@ type UpstreamLabels struct {
 	ReusedConn  bool
 }
 
+type GatewayLabels struct {
+	Handler     string
+	Method      string
+	RouteID     string
+	StatusClass string
+}
+
 type ProxyInfo struct {
 	Scheme             string
 	Address            string
@@ -55,6 +62,8 @@ type Snapshot struct {
 	PluginDurations   map[string]histogramSnapshot
 	UpstreamRequests  map[string]uint64
 	UpstreamDurations map[string]histogramSnapshot
+	GatewayRequests   map[string]uint64
+	GatewayDurations  map[string]histogramSnapshot
 }
 
 // GatewayStats is a pre-computed summary derived from the current snapshot.
@@ -75,6 +84,7 @@ type RouteStats struct {
 }
 
 type Recorder interface {
+	ObserveGateway(GatewayLabels, time.Duration)
 	ObservePlugin(PluginLabels, time.Duration)
 	ObserveUpstream(UpstreamLabels, ProxyInfo)
 	RenderPrometheus() string
@@ -91,6 +101,9 @@ type MemoryRecorder struct {
 
 	upstreamRequests  map[string]uint64
 	upstreamDurations map[string]*histogram
+
+	gatewayRequests  map[string]uint64
+	gatewayDurations map[string]*histogram
 }
 
 type histogram struct {
@@ -111,6 +124,8 @@ func NewMemoryRecorder() *MemoryRecorder {
 		pluginDurations:   make(map[string]*histogram),
 		upstreamRequests:  make(map[string]uint64),
 		upstreamDurations: make(map[string]*histogram),
+		gatewayRequests:   make(map[string]uint64),
+		gatewayDurations:  make(map[string]*histogram),
 	}
 }
 
@@ -127,6 +142,15 @@ func SetDefault(recorder Recorder) {
 		recorder = NewMemoryRecorder()
 	}
 	defaultRecorder = recorder
+}
+
+func (r *MemoryRecorder) ObserveGateway(labels GatewayLabels, duration time.Duration) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	key := renderGatewayKey(labels)
+	r.gatewayRequests[key]++
+	r.observeHistogram(r.gatewayDurations, key, duration.Seconds(), gatewayDurationBuckets())
 }
 
 func (r *MemoryRecorder) ObservePlugin(labels PluginLabels, duration time.Duration) {
@@ -157,6 +181,16 @@ func (r *MemoryRecorder) ObserveUpstream(labels UpstreamLabels, info ProxyInfo) 
 func (r *MemoryRecorder) RenderPrometheus() string {
 	snapshot := r.Snapshot()
 	var builder strings.Builder
+
+	builder.WriteString("# HELP lumen_gateway_requests_total Total gateway requests by bounded handler and route.\n")
+	builder.WriteString("# TYPE lumen_gateway_requests_total counter\n")
+	for _, key := range sortedKeys(snapshot.GatewayRequests) {
+		builder.WriteString(fmt.Sprintf("lumen_gateway_requests_total%s %d\n", key, snapshot.GatewayRequests[key]))
+	}
+
+	builder.WriteString("# HELP lumen_gateway_request_duration_seconds Gateway request duration by bounded handler and route.\n")
+	builder.WriteString("# TYPE lumen_gateway_request_duration_seconds histogram\n")
+	renderHistogramMetric(&builder, "lumen_gateway_request_duration_seconds", snapshot.GatewayDurations)
 
 	builder.WriteString("# HELP lumen_plugin_executions_total Total plugin executions.\n")
 	builder.WriteString("# TYPE lumen_plugin_executions_total counter\n")
@@ -190,6 +224,8 @@ func (r *MemoryRecorder) Snapshot() Snapshot {
 		PluginDurations:   cloneHistogramMap(r.pluginDurations),
 		UpstreamRequests:  cloneCounterMap(r.upstreamRequests),
 		UpstreamDurations: cloneHistogramMap(r.upstreamDurations),
+		GatewayRequests:   cloneCounterMap(r.gatewayRequests),
+		GatewayDurations:  cloneHistogramMap(r.gatewayDurations),
 	}
 }
 
@@ -265,6 +301,8 @@ func (r *MemoryRecorder) Reset() {
 	r.pluginDurations = make(map[string]*histogram)
 	r.upstreamRequests = make(map[string]uint64)
 	r.upstreamDurations = make(map[string]*histogram)
+	r.gatewayRequests = make(map[string]uint64)
+	r.gatewayDurations = make(map[string]*histogram)
 }
 
 func (r *MemoryRecorder) observeHistogram(target map[string]*histogram, key string, value float64, buckets []float64) {
@@ -329,6 +367,25 @@ func pluginDurationBuckets() []float64 {
 
 func upstreamDurationBuckets() []float64 {
 	return []float64{0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10}
+}
+
+func gatewayDurationBuckets() []float64 {
+	return []float64{0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10}
+}
+
+// renderGatewayKey uses only bounded labels. Handler is one of health, metrics,
+// admin, proxy, unmatched, or unavailable; route_id is empty except matched proxy routes.
+func renderGatewayKey(labels GatewayLabels) string {
+	var b strings.Builder
+	b.Grow(120)
+	b.WriteByte('{')
+	first := true
+	first = appendLabel(&b, first, "handler", labels.Handler)
+	first = appendLabel(&b, first, "method", labels.Method)
+	first = appendLabel(&b, first, "route_id", labels.RouteID)
+	_ = appendLabel(&b, first, "status_class", labels.StatusClass)
+	b.WriteByte('}')
+	return b.String()
 }
 
 // renderPluginKey builds the Prometheus label key for plugin metrics.

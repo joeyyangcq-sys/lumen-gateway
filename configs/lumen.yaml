@@ -1,3 +1,7 @@
+logging:
+  level: info
+  format: json
+
 global_plugins:
   - name: response_transformer
     params:

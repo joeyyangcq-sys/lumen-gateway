@@ -4,7 +4,7 @@ services:
   # ── Shared backend ──────────────────────────────────────────────────────
   mock-server:
     build:
-      context: ../../../mock-server
+      context: ./mock-server
       dockerfile: Dockerfile
     container_name: bench-mock-server
     networks:
@@ -89,7 +89,10 @@ services:
       - "9080:9080"
       - "9180:9180"
     volumes:
-      - ./apisix/config.yaml:/usr/local/apisix/conf/config.yaml:ro
+      # APISIX_CONFIG selects between config-passthrough.yaml (access_log off)
+      # and config-pipeline.yaml (buffered access_log). run.sh sets this env var
+      # when switching between the passthrough and pipeline scenario groups.
+      - ${APISIX_CONFIG:-./apisix/config-passthrough.yaml}:/usr/local/apisix/conf/config.yaml:ro
     networks:
       - bench-net
     # Same resource budget as lumen for a fair comparison.

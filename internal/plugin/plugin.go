@@ -3,6 +3,7 @@ package plugin
 import (
 	"errors"
 	"fmt"
+	"io"
 	"slices"
 
 	"github.com/cloudwego/hertz/pkg/app"
@@ -46,11 +47,13 @@ func (d Definition) Supports(scope Scope) bool {
 
 type Registry struct {
 	definitions map[string]Definition
+	closers     []io.Closer
 }
 
 func NewRegistry() *Registry {
 	return &Registry{
 		definitions: make(map[string]Definition),
+		closers:     make([]io.Closer, 0),
 	}
 }
 
@@ -106,6 +109,28 @@ func (r *Registry) Definitions() []Definition {
 		defs = append(defs, def)
 	}
 	return defs
+}
+
+func (r *Registry) addCloser(closer io.Closer) {
+	if closer == nil {
+		return
+	}
+	r.closers = append(r.closers, closer)
+}
+
+func (r *Registry) Close() error {
+	if r == nil {
+		return nil
+	}
+
+	var err error
+	for i := len(r.closers) - 1; i >= 0; i-- {
+		if closeErr := r.closers[i].Close(); err == nil {
+			err = closeErr
+		}
+	}
+	r.closers = nil
+	return err
 }
 
 func AllScopes() []Scope {

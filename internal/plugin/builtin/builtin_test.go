@@ -2,6 +2,7 @@ package builtin
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -522,6 +523,37 @@ func TestAccessLogRequiresPath(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected error for missing path")
+	}
+}
+
+func TestAccessLogWriterCloseStopsFlusherAndClosesFile(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "access.log")
+	writer, err := newAccessLogWriter(logPath, 64)
+	if err != nil {
+		t.Fatalf("newAccessLogWriter() error = %v", err)
+	}
+
+	writer.startFlusher(time.Millisecond)
+	if err := writer.writeLine("first"); err != nil {
+		t.Fatalf("writeLine() error = %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("second Close() error = %v", err)
+	}
+
+	if err := writer.writeLine("second"); !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("writeLine() error = %v, want %v", err, os.ErrClosed)
+	}
+
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read log file: %v", err)
+	}
+	if got := string(data); got != "first\n" {
+		t.Fatalf("log content = %q, want %q", got, "first\n")
 	}
 }
 
