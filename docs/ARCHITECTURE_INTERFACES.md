@@ -15,7 +15,7 @@ The short answer is:
 
 File:
 
-- `/Users/joey/api-gateway/lumen-gateway/internal/provider/provider.go:22`
+- `internal/provider/provider.go:22`
 
 Interface:
 
@@ -39,7 +39,7 @@ This is very much in the same spirit as Bifrost's provider boundary.
 
 File:
 
-- `/Users/joey/api-gateway/lumen-gateway/internal/controlplane/controlplane.go:55`
+- `internal/controlplane/controlplane.go:55`
 
 Interface:
 
@@ -55,7 +55,7 @@ type Store interface {
 
 Companion history boundary:
 
-- `/Users/joey/api-gateway/lumen-gateway/internal/controlplane/history.go:14`
+- `internal/controlplane/history.go:14`
 
 Why it matters:
 
@@ -69,7 +69,7 @@ This is one of the cleanest abstraction layers in the project today.
 
 File:
 
-- `/Users/joey/api-gateway/lumen-gateway/internal/adminapi/adminapi.go:20`
+- `internal/adminapi/adminapi.go:20`
 
 The Admin API depends on a local `service` interface rather than directly on `controlplane.Service`.
 
@@ -84,7 +84,7 @@ This is a good "port" style seam even though it is local and unexported.
 
 File:
 
-- `/Users/joey/api-gateway/lumen-gateway/internal/proxy/proxy.go:35`
+- `internal/proxy/proxy.go:35`
 
 Interface:
 
@@ -106,7 +106,7 @@ This matches the same kind of separation Bifrost has between gateway orchestrati
 
 File:
 
-- `/Users/joey/api-gateway/lumen-gateway/internal/balancer/balancer.go:16`
+- `internal/balancer/balancer.go:16`
 
 Why it matters:
 
@@ -118,7 +118,7 @@ Why it matters:
 
 File:
 
-- `/Users/joey/api-gateway/lumen-gateway/internal/plugin/context.go:13`
+- `internal/plugin/context.go:13`
 
 Interface:
 
@@ -137,7 +137,7 @@ This is a strong extension seam and one of the most important evolutions beyond 
 
 File:
 
-- `/Users/joey/api-gateway/lumen-gateway/internal/observability/observability.go:60`
+- `internal/observability/observability.go:60`
 
 Interface:
 
@@ -154,9 +154,9 @@ There are also narrower internal interfaces used mainly to keep unit tests cheap
 
 Examples:
 
-- `/Users/joey/api-gateway/lumen-gateway/internal/controlplane/etcdstore.go:17`
+- `internal/controlplane/etcdstore.go:17`
   - `etcdKVClient`
-- `/Users/joey/api-gateway/lumen-gateway/internal/provider/provider.go:62`
+- `internal/provider/provider.go:62`
   - `etcdKVClient`
 
 Why these are useful:
@@ -189,8 +189,8 @@ There are still a few areas where we are more concrete than ideal.
 
 Files:
 
-- `/Users/joey/api-gateway/lumen-gateway/internal/gateway/compiler.go:1`
-- `/Users/joey/api-gateway/lumen-gateway/internal/gateway/gateway.go:81`
+- `internal/gateway/compiler.go:1`
+- `internal/gateway/gateway.go:81`
 
 New boundary:
 
@@ -245,7 +245,7 @@ Benefit:
 
 File:
 
-- `/Users/joey/api-gateway/lumen-gateway/internal/gateway/gateway.go:32`
+- `internal/gateway/gateway.go:32`
 
 Current state:
 

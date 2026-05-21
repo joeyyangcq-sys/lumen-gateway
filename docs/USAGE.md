@@ -42,12 +42,12 @@ admin:
 
 Default bootstrap file:
 
-- `/Users/joey/api-gateway/lumen-gateway/configs/bootstrap.yaml`
+- `configs/bootstrap.yaml`
 
 Run locally:
 
 ```bash
-cd /Users/joey/api-gateway/lumen-gateway
+cd lumen-gateway
 go run ./cmd/lumen-gateway --config configs/bootstrap.yaml
 ```
 
@@ -69,7 +69,7 @@ Goal:
 
 Reference config fixture:
 
-- `/Users/joey/api-gateway/lumen-gateway/internal/gateway/testdata/usage/quickstart.yaml`
+- `internal/gateway/testdata/usage/quickstart.yaml`
 
 Core shape:
 
@@ -107,7 +107,7 @@ What this example demonstrates:
 
 Verified by:
 
-- `/Users/joey/api-gateway/lumen-gateway/internal/gateway/usage_examples_test.go`
+- `internal/gateway/usage_examples_test.go`
   - `TestUsageGuideFileModeQuickstart`
 
 ## 3. Example B: request ID + rate limiting
@@ -121,7 +121,7 @@ Goal:
 
 Reference config fixture:
 
-- `/Users/joey/api-gateway/lumen-gateway/internal/gateway/testdata/usage/request_id_limit.yaml`
+- `internal/gateway/testdata/usage/request_id_limit.yaml`
 
 Core shape:
 
@@ -154,7 +154,7 @@ What this example demonstrates:
 
 Verified by:
 
-- `/Users/joey/api-gateway/lumen-gateway/internal/gateway/usage_examples_test.go`
+- `internal/gateway/usage_examples_test.go`
   - `TestUsageGuideRequestIDAndLimitCount`
 
 ## 4. Example C: APISIX-style preview, apply, export, history, rollback
@@ -169,8 +169,8 @@ Goal:
 
 Reference bundle fixtures:
 
-- `/Users/joey/api-gateway/lumen-gateway/internal/adminapi/testdata/usage/bundle_v1.yaml`
-- `/Users/joey/api-gateway/lumen-gateway/internal/adminapi/testdata/usage/bundle_v2.yaml`
+- `internal/adminapi/testdata/usage/bundle_v1.yaml`
+- `internal/adminapi/testdata/usage/bundle_v2.yaml`
 
 Preview request:
 
@@ -216,7 +216,7 @@ What this example demonstrates:
 
 Verified by:
 
-- `/Users/joey/api-gateway/lumen-gateway/internal/adminapi/usage_examples_test.go`
+- `internal/adminapi/usage_examples_test.go`
   - `TestUsageGuideAdminControlWorkflow`
 
 ## 5. Operational notes
