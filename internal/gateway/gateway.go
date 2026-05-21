@@ -45,11 +45,21 @@ type RuntimeSnapshot struct {
 	Services       map[string]*Service
 	Upstreams      map[string]*Upstream
 	closers        []io.Closer
-	lifecycleMu    sync.Mutex
-	lifecycleCond  *sync.Cond
-	inFlight       int
-	closing        bool
-	closed         bool
+
+	inFlight  atomic.Int64 // requests currently holding this snapshot
+	draining  atomic.Bool  // true once Close() starts; acquire() rejects new requests
+	drainedCh chan struct{} // closed when inFlight reaches 0 while draining
+	drainOnce sync.Once    // ensures drainedCh is closed exactly once
+	closedCh  chan struct{} // closed when all resources have been released
+	closeOnce sync.Once    // ensures closedCh is closed exactly once
+}
+
+func newRuntimeSnapshot(closers ...io.Closer) *RuntimeSnapshot {
+	return &RuntimeSnapshot{
+		closers:   closers,
+		drainedCh: make(chan struct{}),
+		closedCh:  make(chan struct{}),
+	}
 }
 
 type Service struct {
@@ -251,24 +261,19 @@ func (s *RuntimeSnapshot) Close() error {
 	if s == nil {
 		return nil
 	}
-	s.lifecycleMu.Lock()
-	cond := s.lifecycleCondLocked()
-	if s.closed {
-		s.lifecycleMu.Unlock()
+	if !s.draining.CompareAndSwap(false, true) {
+		// Another goroutine is already closing; wait for it to finish.
+		<-s.closedCh
 		return nil
 	}
-	if s.closing {
-		for !s.closed {
-			cond.Wait()
-		}
-		s.lifecycleMu.Unlock()
-		return nil
+	// If no requests are in flight at this instant, signal drain immediately.
+	// Any acquire() that raced past the draining check above will see
+	// draining==true in its double-check and undo its increment, so the
+	// snapshot is never used after this point.
+	if s.inFlight.Load() == 0 {
+		s.drainOnce.Do(func() { close(s.drainedCh) })
 	}
-	s.closing = true
-	for s.inFlight > 0 {
-		cond.Wait()
-	}
-	s.lifecycleMu.Unlock()
+	<-s.drainedCh
 
 	var err error
 	for i := len(s.closers) - 1; i >= 0; i-- {
@@ -278,37 +283,30 @@ func (s *RuntimeSnapshot) Close() error {
 	}
 	s.closers = nil
 
-	s.lifecycleMu.Lock()
-	s.closed = true
-	cond.Broadcast()
-	s.lifecycleMu.Unlock()
+	s.closeOnce.Do(func() { close(s.closedCh) })
 	return err
 }
 
 func (s *RuntimeSnapshot) acquire() bool {
-	s.lifecycleMu.Lock()
-	defer s.lifecycleMu.Unlock()
-	if s.closing || s.closed {
+	if s.draining.Load() {
 		return false
 	}
-	s.inFlight++
+	s.inFlight.Add(1)
+	// Double-check: if Close() raced between the two draining reads above,
+	// undo the increment and wake Close() if we decremented to zero.
+	if s.draining.Load() {
+		if s.inFlight.Add(-1) == 0 {
+			s.drainOnce.Do(func() { close(s.drainedCh) })
+		}
+		return false
+	}
 	return true
 }
 
 func (s *RuntimeSnapshot) release() {
-	s.lifecycleMu.Lock()
-	defer s.lifecycleMu.Unlock()
-	s.inFlight--
-	if s.inFlight == 0 && s.closing && s.lifecycleCond != nil {
-		s.lifecycleCond.Broadcast()
+	if s.inFlight.Add(-1) == 0 && s.draining.Load() {
+		s.drainOnce.Do(func() { close(s.drainedCh) })
 	}
-}
-
-func (s *RuntimeSnapshot) lifecycleCondLocked() *sync.Cond {
-	if s.lifecycleCond == nil {
-		s.lifecycleCond = sync.NewCond(&s.lifecycleMu)
-	}
-	return s.lifecycleCond
 }
 
 func buildRouteExecutionHandlers(

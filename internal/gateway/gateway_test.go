@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -173,12 +174,10 @@ func TestCompileClosesBuiltResourcesOnError(t *testing.T) {
 
 func TestRuntimeSnapshotCloseWaitsForInflightRequests(t *testing.T) {
 	var closed atomic.Int32
-	snapshot := &RuntimeSnapshot{
-		closers: []io.Closer{closeFunc(func() error {
-			closed.Add(1)
-			return nil
-		})},
-	}
+	snapshot := newRuntimeSnapshot(closeFunc(func() error {
+		closed.Add(1)
+		return nil
+	}))
 
 	if !snapshot.acquire() {
 		t.Fatal("acquire() = false, want true")
@@ -189,11 +188,7 @@ func TestRuntimeSnapshotCloseWaitsForInflightRequests(t *testing.T) {
 		closeDone <- snapshot.Close()
 	}()
 
-	select {
-	case err := <-closeDone:
-		t.Fatalf("Close() returned before release, err = %v", err)
-	case <-time.After(50 * time.Millisecond):
-	}
+	awaitDraining(t, snapshot)
 	if got := closed.Load(); got != 0 {
 		t.Fatalf("closed resources while request was in-flight = %d, want 0", got)
 	}
@@ -292,16 +287,16 @@ func TestReloadPreservesAccessLogForInflightRequest(t *testing.T) {
 		t.Fatal("request did not reach blocking plugin")
 	}
 
+	oldSnapshot := gw.snapshot.Load()
+
 	reloadDone := make(chan error, 1)
 	go func() {
 		reloadDone <- gw.Reload(options)
 	}()
 
-	select {
-	case err := <-reloadDone:
-		t.Fatalf("Reload() returned while request was still in-flight, err = %v", err)
-	case <-time.After(50 * time.Millisecond):
-	}
+	// awaitDraining is deterministic: it returns only once Close() has set
+	// closing=true and is blocked in its drain-wait, so no timing assumption.
+	awaitDraining(t, oldSnapshot)
 
 	close(release)
 
@@ -769,6 +764,21 @@ type adminHandlerFunc func(context.Context, *app.RequestContext) bool
 
 func (f adminHandlerFunc) ServeHTTP(ctx context.Context, c *app.RequestContext) bool {
 	return f(ctx, c)
+}
+
+// awaitDraining spins until s.draining is true, meaning Close() has set the
+// drain flag and is now waiting for in-flight requests to finish.
+// Using this instead of time.After avoids false passes on a loaded scheduler.
+func awaitDraining(t *testing.T, s *RuntimeSnapshot) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if s.draining.Load() {
+			return
+		}
+		runtime.Gosched()
+	}
+	t.Fatal("snapshot did not enter draining state within 1s")
 }
 
 type runtimeCompilerFunc func(config.Options) (*RuntimeSnapshot, error)

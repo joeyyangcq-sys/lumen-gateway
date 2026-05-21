@@ -2,7 +2,6 @@ package gateway
 
 import (
 	"fmt"
-	"io"
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/joey/lumen-gateway/internal/balancer"
@@ -178,15 +177,14 @@ func (c *Compiler) Compile(options config.Options) (*RuntimeSnapshot, error) {
 	}
 
 	compiled = true
-	return &RuntimeSnapshot{
-		Router:         r,
-		GlobalHandlers: globalHandlers,
-		ServerHandlers: serverHandlers,
-		RouteHandlers:  routeHandlers,
-		Services:       services,
-		Upstreams:      upstreams,
-		closers:        []io.Closer{registry},
-	}, nil
+	snapshot := newRuntimeSnapshot(registry)
+	snapshot.Router = r
+	snapshot.GlobalHandlers = globalHandlers
+	snapshot.ServerHandlers = serverHandlers
+	snapshot.RouteHandlers = routeHandlers
+	snapshot.Services = services
+	snapshot.Upstreams = upstreams
+	return snapshot, nil
 }
 
 func defaultRegistryFactory() (*plugin.Registry, error) {
