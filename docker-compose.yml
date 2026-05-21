@@ -36,7 +36,7 @@ services:
     environment:
       ETCDCTL_API: "3"
     healthcheck:
-      test: ["CMD-SHELL", "etcdctl --endpoints=http://127.0.0.1:2379 endpoint health"]
+      test: ["CMD", "/usr/local/bin/etcdctl", "--endpoints=http://127.0.0.1:2379", "endpoint", "health"]
       interval: 10s
       timeout: 5s
       retries: 5
