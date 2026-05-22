@@ -10,7 +10,6 @@ import (
 	"net"
 	"net/http"
 	"slices"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -46,12 +45,11 @@ type RuntimeSnapshot struct {
 	Upstreams      map[string]*Upstream
 	closers        []io.Closer
 
-	inFlight  atomic.Int64 // requests currently holding this snapshot
-	draining  atomic.Bool  // true once Close() starts; acquire() rejects new requests
-	drainedCh chan struct{} // closed when inFlight reaches 0 while draining
-	drainOnce sync.Once    // ensures drainedCh is closed exactly once
-	closedCh  chan struct{} // closed when all resources have been released
-	closeOnce sync.Once    // ensures closedCh is closed exactly once
+	state         atomic.Int32  // open, closing, or closed
+	inFlight      atomic.Int64  // requests currently holding this snapshot
+	drainSignaled atomic.Bool   // ensures drainedCh is closed exactly once
+	drainedCh     chan struct{} // closed when inFlight reaches 0 while closing
+	closedCh      chan struct{} // closed when all resources have been released
 }
 
 func newRuntimeSnapshot(closers ...io.Closer) *RuntimeSnapshot {
@@ -61,6 +59,12 @@ func newRuntimeSnapshot(closers ...io.Closer) *RuntimeSnapshot {
 		closedCh:  make(chan struct{}),
 	}
 }
+
+const (
+	snapshotStateOpen int32 = iota
+	snapshotStateClosing
+	snapshotStateClosed
+)
 
 type Service struct {
 	ID                string
@@ -261,17 +265,17 @@ func (s *RuntimeSnapshot) Close() error {
 	if s == nil {
 		return nil
 	}
-	if !s.draining.CompareAndSwap(false, true) {
+	if !s.state.CompareAndSwap(snapshotStateOpen, snapshotStateClosing) {
 		// Another goroutine is already closing; wait for it to finish.
 		<-s.closedCh
 		return nil
 	}
 	// If no requests are in flight at this instant, signal drain immediately.
-	// Any acquire() that raced past the draining check above will see
-	// draining==true in its double-check and undo its increment, so the
+	// Any acquire() that raced past the state check above will see
+	// closing in its double-check and undo its increment, so the
 	// snapshot is never used after this point.
 	if s.inFlight.Load() == 0 {
-		s.drainOnce.Do(func() { close(s.drainedCh) })
+		s.signalDrained()
 	}
 	<-s.drainedCh
 
@@ -283,29 +287,34 @@ func (s *RuntimeSnapshot) Close() error {
 	}
 	s.closers = nil
 
-	s.closeOnce.Do(func() { close(s.closedCh) })
+	s.state.Store(snapshotStateClosed)
+	close(s.closedCh)
 	return err
 }
 
 func (s *RuntimeSnapshot) acquire() bool {
-	if s.draining.Load() {
+	if s.state.Load() != snapshotStateOpen {
 		return false
 	}
 	s.inFlight.Add(1)
-	// Double-check: if Close() raced between the two draining reads above,
+	// Double-check: if Close() raced between the two state reads above,
 	// undo the increment and wake Close() if we decremented to zero.
-	if s.draining.Load() {
-		if s.inFlight.Add(-1) == 0 {
-			s.drainOnce.Do(func() { close(s.drainedCh) })
-		}
+	if s.state.Load() != snapshotStateOpen {
+		s.release()
 		return false
 	}
 	return true
 }
 
 func (s *RuntimeSnapshot) release() {
-	if s.inFlight.Add(-1) == 0 && s.draining.Load() {
-		s.drainOnce.Do(func() { close(s.drainedCh) })
+	if s.inFlight.Add(-1) == 0 && s.state.Load() == snapshotStateClosing {
+		s.signalDrained()
+	}
+}
+
+func (s *RuntimeSnapshot) signalDrained() {
+	if s.drainSignaled.CompareAndSwap(false, true) {
+		close(s.drainedCh)
 	}
 }
 
@@ -529,9 +538,27 @@ func collectStdPromMetrics() string {
 
 type metricsResponseWriter struct {
 	body       bytes.Buffer
+	header     http.Header
 	statusCode int
 }
 
-func (w *metricsResponseWriter) Header() http.Header         { return http.Header{} }
-func (w *metricsResponseWriter) WriteHeader(statusCode int)  { w.statusCode = statusCode }
-func (w *metricsResponseWriter) Write(b []byte) (int, error) { return w.body.Write(b) }
+func (w *metricsResponseWriter) Header() http.Header {
+	if w.header == nil {
+		w.header = make(http.Header)
+	}
+	return w.header
+}
+
+func (w *metricsResponseWriter) WriteHeader(statusCode int) {
+	if w.statusCode != 0 {
+		return
+	}
+	w.statusCode = statusCode
+}
+
+func (w *metricsResponseWriter) Write(b []byte) (int, error) {
+	if w.statusCode == 0 {
+		w.statusCode = http.StatusOK
+	}
+	return w.body.Write(b)
+}
