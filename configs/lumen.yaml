@@ -103,6 +103,12 @@ routes:
           body: '{"route":"health-check"}'
           content_type: application/json
 
+  test-api:
+    methods: ["GET"]
+    paths:
+      - "/api/test"
+    service: test-service
+
 services:
   user-service:
     protocol: http
@@ -113,6 +119,10 @@ services:
       write: 3s
     plugins:
       - use: mark-json
+
+  test-service:
+    protocol: http
+    upstream: test-upstream
 
 upstreams:
   user-upstream:
@@ -133,3 +143,10 @@ upstreams:
           add:
             query:
               upstream: user-upstream
+
+  test-upstream:
+    balancer:
+      type: round_robin
+    endpoints:
+      - address: "host.docker.internal:8080"
+        weight: 1
