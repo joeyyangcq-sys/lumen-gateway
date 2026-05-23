@@ -139,8 +139,9 @@ func NewWithCompiler(options config.Options, compiler RuntimeCompiler, adminHand
 	// Health check endpoint — used by Docker and load balancers.
 	h.GET("/health", func(_ context.Context, c *app.RequestContext) {
 		startedAt := time.Now()
+		c.Response.Header.Set("Content-Type", "application/json")
 		c.Response.SetStatusCode(200)
-		c.Response.SetBodyRaw([]byte("ok"))
+		c.Response.SetBodyRaw([]byte(`{"status":"ok"}`))
 		observability.Default().ObserveGateway(observability.GatewayLabels{
 			Handler:     "health",
 			Method:      string(c.Method()),

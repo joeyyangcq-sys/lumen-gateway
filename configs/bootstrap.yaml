@@ -2,7 +2,7 @@ gateway:
   listen: ":18080"
   # file: load lumen YAML config from disk
   # etcd_apisix: load APISIX-compatible resources from etcd (/apisix/*)
-  source: etcd_apisix
+  source: file
 
 file:
   path: configs/lumen.yaml
