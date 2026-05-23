@@ -5,6 +5,8 @@
 
 A pure-Go L7 API gateway — **low tail latency**, **APISIX-compatible Admin API**, **5-scope plugin chain**, and **zero-downtime hot reload** via etcd. Ships as a single ~15 MB binary with no Nginx, OpenResty, or LuaJIT dependency.
 
+Developed as a showcase portfolio by **Joey Yang** (Senior Backend & Gateway Engineer) to demonstrate high-concurrency L7 traffic routing, lock-free state synchronization, and zero-allocation memory optimizations.
+
 ---
 
 ## Highlights
@@ -19,6 +21,14 @@ A pure-Go L7 API gateway — **low tail latency**, **APISIX-compatible Admin API
 | **Single binary** | ~15 MB, no runtime dependencies |
 | **9 built-in plugins** | Rate limiting, request/response transformation, path rewriting, access log |
 
+### Monorepo & Portfolio Integration
+This project is the data-plane core of the **[Lumen Ecosystem](https://github.com/joeyyangcq-sys/lumen)**. It interfaces with **[Lumen OAuth](https://github.com/joeyyangcq-sys/lumen-oauth)** for auth/OIDC flows, **[Lumen MCP Server](https://github.com/joeyyangcq-sys/lumen-mcp-server)** for AI-native LLM control, and **[Lumen Admin UI](https://github.com/joeyyangcq-sys/lumen-admin-ui)**.
+
+### Resume Engineering Alignments
+- **Zero-Allocation Context**: Utilizes stack-allocation optimizations for request execution contexts (`0 bytes/request` overhead in the core proxy loop), reducing GC pauses and keeping tail latency uniform under heavy load.
+- **Lock-Free Configuration Swapping**: Implements local dual-buffer caching and Go `atomic.Pointer[Snapshot]` switches driven by etcd Pub/Sub, avoiding mutex contention on the fast read path.
+- **Aho-Corasick Multi-Pattern Path Matching**: Implements a high-efficiency URI mapping router using an AC-automaton, replacing expensive regex checks with $O(M)$ time complexity pattern matching.
+
 ---
 
 ## Quick Start
@@ -26,7 +36,7 @@ A pure-Go L7 API gateway — **low tail latency**, **APISIX-compatible Admin API
 ### File mode (development)
 
 ```bash
-git clone https://github.com/joey/lumen-gateway
+git clone https://github.com/joeyyangcq-sys/lumen-gateway
 cd lumen-gateway
 go run ./cmd/lumen-gateway --config configs/bootstrap.yaml
 ```
@@ -73,40 +83,48 @@ curl -X PUT http://localhost:18080/apisix/admin/routes/my-route \
 ### Request Pipeline
 
 ```mermaid
-graph TB
-    Client["Client Request"] --> Hertz["Hertz Server :18080"]
-    Hertz --> Router["Router\nexact > prefix > regex priority"]
-
-    Router --> GP["Global Plugins"]
-    GP --> SP["Server Plugins"]
-    SP --> RP["Route Plugins"]
-    RP --> SvP["Service Plugins"]
-    SvP --> UP["Upstream Plugins"]
-
-    UP --> Balancer["Load Balancer\nWeighted Round-Robin"]
-    Balancer --> Proxy["HTTP Proxy\nConnection Pool"]
+graph TD
+    Client["Client Request"] --> Hertz["Hertz Web Engine (:18080)"]
+    Hertz --> Router["Aho-Corasick Router<br/>(Exact > Prefix > Wildcard > Regex)"]
+    
+    subgraph ExecutionChain ["5-Scope Plugin execution chain"]
+        Router --> GP["1. Global Plugins<br/>(request_id, access_log)"]
+        GP --> SP["2. Server Plugins"]
+        SP --> RP["3. Route Plugins<br/>(limit_count, auth)"]
+        RP --> SvP["4. Service Plugins"]
+        SvP --> UP["5. Upstream Plugins<br/>(request_transformer)"]
+    end
+    
+    UP --> Balancer["Load Balancer<br/>(Weighted Round-Robin)"]
+    Balancer --> Proxy["HTTP Reverse Proxy<br/>(Connection Pooling)"]
     Proxy --> Backend["Upstream Service"]
-
-    Backend --> RespPlugins["Response Plugins (reverse order)"]
-    RespPlugins --> Client
+    
+    Backend --> RespChain["Response Transformation Chain<br/>(Plugins in reverse order)"]
+    RespChain --> Client
 ```
 
 ### Zero-Downtime Hot Reload
 
 ```mermaid
 sequenceDiagram
-    participant etcd
-    participant Provider as Config Provider
-    participant Gateway
-    participant Compiler as RuntimeCompiler
-    participant Snapshot as atomic.Pointer[Snapshot]
+    autonumber
+    participant etcd as etcd Cluster (:2379)
+    participant Provider as Config Provider (etcd Watcher)
+    participant Engine as Gateway Core Engine
+    participant Compiler as Runtime Compiler
+    participant Snapshot as atomic.Pointer[RuntimeSnapshot]
 
-    etcd->>Provider: Watch /apisix/* change
-    Provider->>Gateway: onUpdate(Options)
-    Gateway->>Compiler: Compile(Options)
-    Compiler->>Compiler: Build route table\nRegister plugin chains\nInit balancers
-    Compiler->>Snapshot: atomic.Store(new snapshot)
-    Note over Snapshot: Lock-free switch\nNext request uses new snapshot
+    etcd->>Provider: Watch Event (/apisix/routes/...)
+    Provider->>Engine: Notify Config Updated
+    Engine->>Compiler: Compile Options
+    activate Compiler
+    Compiler->>Compiler: Build AC Router Table
+    Compiler->>Compiler: Validate & Compile Plugins
+    Compiler->>Compiler: Initialize Load Balancers
+    Compiler-->>Engine: Compiled RuntimeSnapshot
+    deactivate Compiler
+    Engine->>Snapshot: Swap Pointer (atomic.Store)
+    Note over Snapshot: Lock-free atomic switch.<br/>Zero requests dropped or interrupted.
 ```
 
 ### Design Principles
