@@ -76,6 +76,10 @@ func (c *Compiler) BuildRegistry() (*plugin.Registry, error) {
 }
 
 func (c *Compiler) Compile(options config.Options) (*RuntimeSnapshot, error) {
+	if len(options.Servers) > 1 {
+		return nil, fmt.Errorf("multiple servers are not supported: got %d", len(options.Servers))
+	}
+
 	registry, err := c.registryFactory()
 	if err != nil {
 		return nil, err
@@ -178,15 +182,14 @@ func (c *Compiler) Compile(options config.Options) (*RuntimeSnapshot, error) {
 	}
 
 	compiled = true
-	return &RuntimeSnapshot{
-		Router:         r,
-		GlobalHandlers: globalHandlers,
-		ServerHandlers: serverHandlers,
-		RouteHandlers:  routeHandlers,
-		Services:       services,
-		Upstreams:      upstreams,
-		closers:        []io.Closer{registry},
-	}, nil
+	snapshot := newRuntimeSnapshot(registry)
+	snapshot.Router = r
+	snapshot.GlobalHandlers = globalHandlers
+	snapshot.ServerHandlers = serverHandlers
+	snapshot.RouteHandlers = routeHandlers
+	snapshot.Services = services
+	snapshot.Upstreams = upstreams
+	return snapshot, nil
 }
 
 func defaultRegistryFactory() (*plugin.Registry, error) {

@@ -7,14 +7,19 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/joey/lumen-gateway/internal/config"
 	"github.com/joey/lumen-gateway/internal/observability"
 	"github.com/joey/lumen-gateway/internal/plugin"
+	"github.com/joey/lumen-gateway/internal/plugin/builtin"
 	"github.com/joey/lumen-gateway/internal/proxy"
 )
 
@@ -164,6 +169,248 @@ func TestCompileClosesBuiltResourcesOnError(t *testing.T) {
 	}
 	if got := closed.Load(); got != 1 {
 		t.Fatalf("closed resources after compile error = %d, want 1", got)
+	}
+}
+
+func TestRuntimeSnapshotCloseWaitsForInflightRequests(t *testing.T) {
+	var closed atomic.Int32
+	snapshot := newRuntimeSnapshot(closeFunc(func() error {
+		closed.Add(1)
+		return nil
+	}))
+
+	if !snapshot.acquire() {
+		t.Fatal("acquire() = false, want true")
+	}
+
+	closeDone := make(chan error, 1)
+	go func() {
+		closeDone <- snapshot.Close()
+	}()
+
+	awaitDraining(t, snapshot)
+	if got := closed.Load(); got != 0 {
+		t.Fatalf("closed resources while request was in-flight = %d, want 0", got)
+	}
+	if snapshot.acquire() {
+		t.Fatal("acquire() = true while snapshot is closing, want false")
+	}
+
+	snapshot.release()
+
+	select {
+	case err := <-closeDone:
+		if err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Close() did not return after release")
+	}
+	if got := closed.Load(); got != 1 {
+		t.Fatalf("closed resources = %d, want 1", got)
+	}
+}
+
+func TestRuntimeSnapshotCloseAcquireRace(t *testing.T) {
+	for i := 0; i < 100; i++ {
+		var closed atomic.Int32
+		snapshot := newRuntimeSnapshot(closeFunc(func() error {
+			closed.Add(1)
+			return nil
+		}))
+
+		start := make(chan struct{})
+		acquired := make(chan bool, 1)
+		closeDone := make(chan error, 1)
+		go func() {
+			<-start
+			if ok := snapshot.acquire(); ok {
+				snapshot.release()
+				acquired <- true
+				return
+			}
+			acquired <- false
+		}()
+		go func() {
+			<-start
+			closeDone <- snapshot.Close()
+		}()
+		close(start)
+
+		select {
+		case err := <-closeDone:
+			if err != nil {
+				t.Fatalf("Close() error = %v", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("Close() did not return")
+		}
+		select {
+		case <-acquired:
+		case <-time.After(time.Second):
+			t.Fatal("acquire goroutine did not return")
+		}
+		if got := closed.Load(); got != 1 {
+			t.Fatalf("closed resources = %d, want 1", got)
+		}
+	}
+}
+
+func TestReloadPreservesAccessLogForInflightRequest(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "access.log")
+	blocked := make(chan struct{})
+	release := make(chan struct{})
+
+	compiler := NewRuntimeCompiler(WithRegistryFactory(func() (*plugin.Registry, error) {
+		registry := plugin.NewRegistry()
+		if err := builtin.Register(registry); err != nil {
+			return nil, err
+		}
+		if err := plugin.RegisterTypedContext[struct{}](registry, plugin.Metadata{
+			Name:     "block",
+			Priority: 200,
+			Scopes:   []plugin.Scope{plugin.ScopeRoute},
+		}, func(struct{}) (plugin.ContextHandler, error) {
+			return func(ctx context.Context, pc plugin.PluginContext) {
+				select {
+				case blocked <- struct{}{}:
+				default:
+				}
+				<-release
+				pc.Next(ctx)
+			}, nil
+		}); err != nil {
+			return nil, err
+		}
+		return registry, nil
+	}))
+
+	options := gatewayOptions("127.0.0.1:9001")
+	options.GlobalPlugins = append(options.GlobalPlugins, config.PluginRef{
+		Name: "access_log",
+		Params: map[string]any{
+			"path":           logPath,
+			"format":         "$request_method $status",
+			"flush_interval": "1h",
+		},
+	})
+	route := options.Routes["user-api"]
+	route.Plugins = append(route.Plugins, config.PluginRef{Name: "block"})
+	options.Routes["user-api"] = route
+
+	gw, err := NewWithCompiler(options, compiler)
+	if err != nil {
+		t.Fatalf("NewWithCompiler() error = %v", err)
+	}
+	defer func() {
+		_ = gw.Shutdown()
+	}()
+	installTransport(gw, roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusCreated,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader("created")),
+		}, nil
+	}))
+
+	requestDone := make(chan struct{})
+	go func() {
+		defer close(requestDone)
+		c := app.NewContext(0)
+		c.Request.SetMethod("GET")
+		c.Request.SetHost("original.test")
+		c.Request.URI().SetPath("/api/users")
+		gw.ServeHTTP(context.Background(), c)
+		if got := c.Response.StatusCode(); got != http.StatusCreated {
+			t.Errorf("status = %d, want %d", got, http.StatusCreated)
+		}
+	}()
+
+	select {
+	case <-blocked:
+	case <-time.After(time.Second):
+		t.Fatal("request did not reach blocking plugin")
+	}
+
+	oldSnapshot := gw.snapshot.Load()
+
+	reloadDone := make(chan error, 1)
+	go func() {
+		reloadDone <- gw.Reload(options)
+	}()
+
+	// awaitDraining is deterministic: it returns only once Close() has set
+	// closing=true and is blocked in its drain-wait, so no timing assumption.
+	awaitDraining(t, oldSnapshot)
+
+	close(release)
+
+	select {
+	case <-requestDone:
+	case <-time.After(time.Second):
+		t.Fatal("request did not finish after release")
+	}
+	select {
+	case err := <-reloadDone:
+		if err != nil {
+			t.Fatalf("Reload() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Reload() did not finish after request completed")
+	}
+
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read access log: %v", err)
+	}
+	if got := string(data); !strings.Contains(got, "GET 201\n") {
+		t.Fatalf("access log = %q, want in-flight request entry", got)
+	}
+}
+
+func TestBuildSnapshotRejectsMultipleServers(t *testing.T) {
+	options := gatewayOptions("127.0.0.1:9001")
+	options.Servers["second"] = config.ServerOptions{
+		ID:     "second",
+		Listen: ":8081",
+	}
+
+	_, err := BuildSnapshot(options)
+	if err == nil {
+		t.Fatal("BuildSnapshot() error = nil, want multiple server error")
+	}
+	if !strings.Contains(err.Error(), "multiple servers are not supported") {
+		t.Fatalf("BuildSnapshot() error = %q, want multiple server error", err.Error())
+	}
+}
+
+func TestMetricsResponseWriterPreservesHeadersAndStatus(t *testing.T) {
+	writer := &metricsResponseWriter{}
+	writer.Header().Set("Content-Type", "text/plain")
+	writer.WriteHeader(http.StatusAccepted)
+	writer.WriteHeader(http.StatusInternalServerError)
+	if _, err := writer.Write([]byte("ok")); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+
+	if got := writer.Header().Get("Content-Type"); got != "text/plain" {
+		t.Fatalf("Content-Type = %q, want text/plain", got)
+	}
+	if got := writer.statusCode; got != http.StatusAccepted {
+		t.Fatalf("statusCode = %d, want %d", got, http.StatusAccepted)
+	}
+	if got := writer.body.String(); got != "ok" {
+		t.Fatalf("body = %q, want ok", got)
+	}
+}
+
+func TestMetricsResponseWriterDefaultsStatusOnWrite(t *testing.T) {
+	writer := &metricsResponseWriter{}
+	if _, err := writer.Write([]byte("ok")); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+	if got := writer.statusCode; got != http.StatusOK {
+		t.Fatalf("statusCode = %d, want %d", got, http.StatusOK)
 	}
 }
 
@@ -608,6 +855,21 @@ type adminHandlerFunc func(context.Context, *app.RequestContext) bool
 
 func (f adminHandlerFunc) ServeHTTP(ctx context.Context, c *app.RequestContext) bool {
 	return f(ctx, c)
+}
+
+// awaitDraining spins until s.state is closing, meaning Close() has set the
+// drain flag and is now waiting for in-flight requests to finish.
+// Using this instead of time.After avoids false passes on a loaded scheduler.
+func awaitDraining(t *testing.T, s *RuntimeSnapshot) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if s.state.Load() == snapshotStateClosing {
+			return
+		}
+		runtime.Gosched()
+	}
+	t.Fatal("snapshot did not enter draining state within 1s")
 }
 
 type runtimeCompilerFunc func(config.Options) (*RuntimeSnapshot, error)

@@ -19,14 +19,17 @@ APISIX_KEY="benchmark-admin-key"
 # ── Step 1: Check prerequisites ──────────────────────────────────────────────
 
 info "Checking prerequisites..."
-command -v k6 >/dev/null 2>&1 || fail "k6 not found. Install with: brew install k6"
+command -v k6     >/dev/null 2>&1 || fail "k6 not found. Install with: brew install k6"
 command -v docker >/dev/null 2>&1 || fail "docker not found"
-command -v curl >/dev/null 2>&1 || fail "curl not found"
+command -v curl   >/dev/null 2>&1 || fail "curl not found"
 
-# ── Step 2: Start all services via Docker Compose ────────────────────────────
+# ── Step 2: Start services (APISIX starts with passthrough config) ───────────
 
 info "Starting benchmark services via Docker Compose..."
-docker compose -f "$BENCH_DIR/docker-compose.yml" up -d --build
+# Default APISIX_CONFIG is config-passthrough.yaml (access_log off).
+# run.sh will restart APISIX with config-pipeline.yaml for pipeline scenarios.
+APISIX_CONFIG="$BENCH_DIR/apisix/config-passthrough.yaml" \
+    docker compose -f "$BENCH_DIR/docker-compose.yml" up -d --build
 
 info "Waiting for services to become healthy..."
 
@@ -43,6 +46,7 @@ wait_for() {
 }
 
 wait_for "lumen-gateway" "http://localhost:18080/health"
+
 wait_for_apisix() {
     local retries=30
     for i in $(seq 1 $retries); do
@@ -56,7 +60,7 @@ wait_for_apisix() {
 }
 wait_for_apisix
 
-# ── Step 3: Configure APISIX routes ─────────────────────────────────────────
+# ── Step 3: Configure APISIX resources ──────────────────────────────────────
 
 info "Configuring APISIX upstream (mock-server:9001)..."
 curl -sf -X PUT "$APISIX_ADMIN/apisix/admin/upstreams/bench-upstream" \
@@ -68,7 +72,9 @@ curl -sf -X PUT "$APISIX_ADMIN/apisix/admin/upstreams/bench-upstream" \
         "timeout": {"connect": 3, "send": 5, "read": 5}
     }' >/dev/null
 
-info "Configuring APISIX route: /benchmark/echo..."
+# Passthrough route — pure proxy, no plugins.
+# Mirrors Lumen bench-echo route (no plugin overhead on either side).
+info "Configuring APISIX route: /benchmark/echo (no plugins)..."
 curl -sf -X PUT "$APISIX_ADMIN/apisix/admin/routes/bench-echo" \
     -H "X-API-KEY: $APISIX_KEY" \
     -H "Content-Type: application/json" \
@@ -78,7 +84,25 @@ curl -sf -X PUT "$APISIX_ADMIN/apisix/admin/routes/bench-echo" \
         "upstream_id": "bench-upstream"
     }' >/dev/null
 
-info "APISIX routes configured"
+# Pipeline route — request-id plugin.
+# The nginx access_log is configured at the server level via config-pipeline.yaml
+# (buffer=16384, flush=1s) to match Lumen bench-pipeline access_log plugin.
+info "Configuring APISIX route: /benchmark/pipeline (request-id plugin)..."
+curl -sf -X PUT "$APISIX_ADMIN/apisix/admin/routes/bench-pipeline" \
+    -H "X-API-KEY: $APISIX_KEY" \
+    -H "Content-Type: application/json" \
+    -d '{
+        "uri": "/benchmark/pipeline",
+        "methods": ["GET", "POST"],
+        "upstream_id": "bench-upstream",
+        "plugins": {
+            "request-id": {
+                "include_in_response": true
+            }
+        }
+    }' >/dev/null
+
+info "APISIX resources configured"
 
 # ── Step 4: Verify both gateways ────────────────────────────────────────────
 
@@ -87,22 +111,38 @@ sleep 2
 if curl -sf http://localhost:18080/benchmark/echo >/dev/null 2>&1; then
     info "lumen-gateway proxy verified: /benchmark/echo -> mock-server"
 else
-    fail "lumen-gateway proxy verification failed"
+    fail "lumen-gateway /benchmark/echo verification failed"
+fi
+
+if curl -sf http://localhost:18080/benchmark/pipeline >/dev/null 2>&1; then
+    info "lumen-gateway proxy verified: /benchmark/pipeline -> mock-server"
+else
+    fail "lumen-gateway /benchmark/pipeline verification failed"
 fi
 
 if curl -sf http://localhost:9080/benchmark/echo >/dev/null 2>&1; then
     info "APISIX proxy verified: /benchmark/echo -> mock-server"
 else
-    fail "APISIX proxy verification failed"
+    fail "APISIX /benchmark/echo verification failed"
+fi
+
+if curl -sf http://localhost:9080/benchmark/pipeline >/dev/null 2>&1; then
+    info "APISIX proxy verified: /benchmark/pipeline -> mock-server"
+else
+    fail "APISIX /benchmark/pipeline verification failed"
 fi
 
 # ── Done ─────────────────────────────────────────────────────────────────────
 
 echo ""
 info "Setup complete! All services running in Docker."
-info "  mock-server:    bench-mock-server (Docker internal)"
-info "  lumen-gateway:  http://localhost:18080/benchmark/echo"
-info "  APISIX:         http://localhost:9080/benchmark/echo"
+info "  mock-server:         bench-mock-server (Docker internal)"
+info "  lumen-gateway:"
+info "    passthrough route: http://localhost:18080/benchmark/echo"
+info "    pipeline route:    http://localhost:18080/benchmark/pipeline"
+info "  APISIX:"
+info "    passthrough route: http://localhost:9080/benchmark/echo"
+info "    pipeline route:    http://localhost:9080/benchmark/pipeline"
 echo ""
 info "Run benchmarks with: bash $SCRIPT_DIR/run.sh"
 info "Tear down with: docker compose -f $BENCH_DIR/docker-compose.yml down -v"
