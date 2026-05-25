@@ -71,7 +71,19 @@ type PluginContext interface {
 type ContextHandler func(context.Context, PluginContext)
 
 type hertzPluginContext struct {
-	raw *app.RequestContext
+	raw             *app.RequestContext
+	routeID         string
+	serviceID       string
+	upstreamID      string
+	upstreamHost    string
+	endpointAddress string
+	phase           string
+	requestID       string
+	regexCaptures   []string
+	gatewayError    error
+	upstreamStatus  int
+	proxyInfo       observability.ProxyInfo
+	aborted         bool
 }
 
 func WrapContextHandler(handler ContextHandler) app.HandlerFunc {
@@ -123,55 +135,119 @@ func RegisterTypedContextWithCloser[T any](
 	})
 }
 
+const pluginContextKey = "_lumen_plugin_context"
+
 func FromRequestContext(c *app.RequestContext) PluginContext {
-	return &hertzPluginContext{raw: c}
+	if val, ok := c.Get(pluginContextKey); ok {
+		if pc, ok := val.(PluginContext); ok {
+			return pc
+		}
+	}
+	pc := &hertzPluginContext{raw: c}
+	c.Set(pluginContextKey, pc)
+	return pc
 }
 
 func SetRouteID(c *app.RequestContext, routeID string) {
-	c.Set(runtimectx.RouteIDKey, routeID)
+	pc := FromRequestContext(c)
+	if hpc, ok := pc.(*hertzPluginContext); ok {
+		hpc.routeID = routeID
+	} else {
+		pc.SetValue(runtimectx.RouteIDKey, routeID)
+	}
 }
 
 func SetServiceID(c *app.RequestContext, serviceID string) {
-	c.Set(runtimectx.ServiceIDKey, serviceID)
+	pc := FromRequestContext(c)
+	if hpc, ok := pc.(*hertzPluginContext); ok {
+		hpc.serviceID = serviceID
+	} else {
+		pc.SetValue(runtimectx.ServiceIDKey, serviceID)
+	}
 }
 
 func SetUpstreamID(c *app.RequestContext, upstreamID string) {
-	c.Set(runtimectx.UpstreamIDKey, upstreamID)
+	pc := FromRequestContext(c)
+	if hpc, ok := pc.(*hertzPluginContext); ok {
+		hpc.upstreamID = upstreamID
+	} else {
+		pc.SetValue(runtimectx.UpstreamIDKey, upstreamID)
+	}
 }
 
 func SetUpstreamHost(c *app.RequestContext, upstreamHost string) {
-	c.Set(runtimectx.UpstreamHostKey, upstreamHost)
+	pc := FromRequestContext(c)
+	if hpc, ok := pc.(*hertzPluginContext); ok {
+		hpc.upstreamHost = upstreamHost
+	} else {
+		pc.SetValue(runtimectx.UpstreamHostKey, upstreamHost)
+	}
 }
 
 func SetEndpointAddress(c *app.RequestContext, address string) {
-	c.Set(runtimectx.EndpointAddrKey, address)
+	pc := FromRequestContext(c)
+	if hpc, ok := pc.(*hertzPluginContext); ok {
+		hpc.endpointAddress = address
+	} else {
+		pc.SetValue(runtimectx.EndpointAddrKey, address)
+	}
 }
 
 func SetRequestID(c *app.RequestContext, requestID string) {
-	c.Set(runtimectx.RequestIDKey, requestID)
+	pc := FromRequestContext(c)
+	if hpc, ok := pc.(*hertzPluginContext); ok {
+		hpc.requestID = requestID
+	} else {
+		pc.SetValue(runtimectx.RequestIDKey, requestID)
+	}
 }
 
 func SetPhase(c *app.RequestContext, phase string) {
-	c.Set(runtimectx.PhaseKey, phase)
+	pc := FromRequestContext(c)
+	if hpc, ok := pc.(*hertzPluginContext); ok {
+		hpc.phase = phase
+	} else {
+		pc.SetValue(runtimectx.PhaseKey, phase)
+	}
 }
 
 func SetRegexCaptures(c *app.RequestContext, captures []string) {
-	c.Set(runtimectx.RegexCapturesKey, captures)
+	pc := FromRequestContext(c)
+	if hpc, ok := pc.(*hertzPluginContext); ok {
+		hpc.regexCaptures = captures
+	} else {
+		pc.SetValue(runtimectx.RegexCapturesKey, captures)
+	}
 }
 
 func SetGatewayError(c *app.RequestContext, err error) {
 	if err == nil {
 		return
 	}
-	c.Set(runtimectx.GatewayErrorKey, err)
+	pc := FromRequestContext(c)
+	if hpc, ok := pc.(*hertzPluginContext); ok {
+		hpc.gatewayError = err
+	} else {
+		pc.SetValue(runtimectx.GatewayErrorKey, err)
+	}
 }
 
 func SetUpstreamStatusCode(c *app.RequestContext, status int) {
-	c.Set(runtimectx.UpstreamStatusKey, status)
+	pc := FromRequestContext(c)
+	if hpc, ok := pc.(*hertzPluginContext); ok {
+		hpc.upstreamStatus = status
+	} else {
+		pc.SetValue(runtimectx.UpstreamStatusKey, status)
+	}
 }
 
 func SetProxyInfo(c *app.RequestContext, info observability.ProxyInfo) {
-	c.Set(runtimectx.ProxyInfoKey, info)
+	pc := FromRequestContext(c)
+	if hpc, ok := pc.(*hertzPluginContext); ok {
+		hpc.proxyInfo = info
+	} else {
+		pc.SetValue(runtimectx.ProxyInfoKey, info)
+	}
 }
 
 func (p *hertzPluginContext) Raw() *app.RequestContext {
@@ -183,72 +259,142 @@ func (p *hertzPluginContext) Next(ctx context.Context) {
 }
 
 func (p *hertzPluginContext) Abort() {
+	p.aborted = true
 	p.raw.Set(runtimectx.PluginAbortKey, true)
 	p.raw.Abort()
 }
 
 func (p *hertzPluginContext) Value(key string) (any, bool) {
-	return p.raw.Get(key)
+	switch key {
+	case runtimectx.RouteIDKey:
+		return p.routeID, true
+	case runtimectx.ServiceIDKey:
+		return p.serviceID, true
+	case runtimectx.UpstreamIDKey:
+		return p.upstreamID, true
+	case runtimectx.UpstreamHostKey:
+		return p.upstreamHost, true
+	case runtimectx.EndpointAddrKey:
+		return p.endpointAddress, true
+	case runtimectx.PhaseKey:
+		return p.phase, true
+	case runtimectx.RequestIDKey:
+		return p.requestID, true
+	case runtimectx.RegexCapturesKey:
+		return p.regexCaptures, true
+	case runtimectx.GatewayErrorKey:
+		return p.gatewayError, true
+	case runtimectx.UpstreamStatusKey:
+		return p.upstreamStatus, true
+	case runtimectx.ProxyInfoKey:
+		return p.proxyInfo, true
+	case runtimectx.PluginAbortKey:
+		return p.aborted, true
+	default:
+		return p.raw.Get(key)
+	}
 }
 
 func (p *hertzPluginContext) SetValue(key string, value any) {
-	p.raw.Set(key, value)
+	switch key {
+	case runtimectx.RouteIDKey:
+		if s, ok := value.(string); ok {
+			p.routeID = s
+		}
+	case runtimectx.ServiceIDKey:
+		if s, ok := value.(string); ok {
+			p.serviceID = s
+		}
+	case runtimectx.UpstreamIDKey:
+		if s, ok := value.(string); ok {
+			p.upstreamID = s
+		}
+	case runtimectx.UpstreamHostKey:
+		if s, ok := value.(string); ok {
+			p.upstreamHost = s
+		}
+	case runtimectx.EndpointAddrKey:
+		if s, ok := value.(string); ok {
+			p.endpointAddress = s
+		}
+	case runtimectx.PhaseKey:
+		if s, ok := value.(string); ok {
+			p.phase = s
+		}
+	case runtimectx.RequestIDKey:
+		if s, ok := value.(string); ok {
+			p.requestID = s
+		}
+	case runtimectx.RegexCapturesKey:
+		if s, ok := value.([]string); ok {
+			p.regexCaptures = s
+		}
+	case runtimectx.GatewayErrorKey:
+		if err, ok := value.(error); ok {
+			p.gatewayError = err
+		}
+	case runtimectx.UpstreamStatusKey:
+		if i, ok := value.(int); ok {
+			p.upstreamStatus = i
+		}
+	case runtimectx.ProxyInfoKey:
+		if info, ok := value.(observability.ProxyInfo); ok {
+			p.proxyInfo = info
+		}
+	case runtimectx.PluginAbortKey:
+		if b, ok := value.(bool); ok {
+			p.aborted = b
+		}
+	default:
+		p.raw.Set(key, value)
+	}
 }
 
 func (p *hertzPluginContext) RouteID() string {
-	return getStringValue(p.raw, runtimectx.RouteIDKey)
+	return p.routeID
 }
 
 func (p *hertzPluginContext) ServiceID() string {
-	return getStringValue(p.raw, runtimectx.ServiceIDKey)
+	return p.serviceID
 }
 
 func (p *hertzPluginContext) UpstreamID() string {
-	return getStringValue(p.raw, runtimectx.UpstreamIDKey)
+	return p.upstreamID
 }
 
 func (p *hertzPluginContext) UpstreamHost() string {
-	return getStringValue(p.raw, runtimectx.UpstreamHostKey)
+	return p.upstreamHost
 }
 
 func (p *hertzPluginContext) EndpointAddress() string {
-	return getStringValue(p.raw, runtimectx.EndpointAddrKey)
+	return p.endpointAddress
 }
 
 func (p *hertzPluginContext) Phase() string {
-	phase := getStringValue(p.raw, runtimectx.PhaseKey)
-	if phase == "" {
+	if p.phase == "" {
 		return "request"
 	}
-	return phase
+	return p.phase
 }
 
 func (p *hertzPluginContext) SetPhase(phase string) {
-	SetPhase(p.raw, phase)
+	p.phase = phase
 }
 
 func (p *hertzPluginContext) RequestID() string {
-	return getStringValue(p.raw, runtimectx.RequestIDKey)
+	return p.requestID
 }
 
 func (p *hertzPluginContext) SetRequestID(requestID string) {
-	SetRequestID(p.raw, requestID)
+	p.requestID = requestID
 }
 
 func (p *hertzPluginContext) RegexCaptures() []string {
-	value, ok := p.raw.Get(runtimectx.RegexCapturesKey)
-	if !ok {
-		return nil
-	}
-	captures, ok := value.([]string)
-	if !ok {
-		return nil
-	}
-	return captures
+	return p.regexCaptures
 }
 
 func (p *hertzPluginContext) SetRegexCaptures(captures []string) {
-	SetRegexCaptures(p.raw, captures)
+	p.regexCaptures = captures
 }
 
 func (p *hertzPluginContext) RequestMethod() string {
@@ -361,66 +507,34 @@ func (p *hertzPluginContext) ClientIP() string {
 }
 
 func (p *hertzPluginContext) GatewayError() error {
-	value, ok := p.raw.Get(runtimectx.GatewayErrorKey)
-	if !ok {
-		return nil
-	}
-	err, ok := value.(error)
-	if !ok {
-		return nil
-	}
-	return err
+	return p.gatewayError
 }
 
 func (p *hertzPluginContext) SetGatewayError(err error) {
-	SetGatewayError(p.raw, err)
+	p.gatewayError = err
 }
 
 func (p *hertzPluginContext) UpstreamStatusCode() int {
-	value, ok := p.raw.Get(runtimectx.UpstreamStatusKey)
-	if !ok {
-		return 0
-	}
-	status, ok := value.(int)
-	if !ok {
-		return 0
-	}
-	return status
+	return p.upstreamStatus
 }
 
 func (p *hertzPluginContext) SetUpstreamStatusCode(status int) {
-	SetUpstreamStatusCode(p.raw, status)
+	p.upstreamStatus = status
 }
 
 func (p *hertzPluginContext) ProxyInfo() observability.ProxyInfo {
-	value, ok := p.raw.Get(runtimectx.ProxyInfoKey)
-	if !ok {
-		return observability.ProxyInfo{}
-	}
-	info, ok := value.(observability.ProxyInfo)
-	if !ok {
-		return observability.ProxyInfo{}
-	}
-	return info
+	return p.proxyInfo
 }
 
 func (p *hertzPluginContext) SetProxyInfo(info observability.ProxyInfo) {
-	SetProxyInfo(p.raw, info)
-}
-
-func getStringValue(c *app.RequestContext, key string) string {
-	value, ok := c.Get(key)
-	if !ok {
-		return ""
-	}
-	s, ok := value.(string)
-	if !ok {
-		return ""
-	}
-	return s
+	p.proxyInfo = info
 }
 
 func IsAborted(c *app.RequestContext) bool {
+	pc := FromRequestContext(c)
+	if hpc, ok := pc.(*hertzPluginContext); ok {
+		return hpc.aborted
+	}
 	value, ok := c.Get(runtimectx.PluginAbortKey)
 	if !ok {
 		return false

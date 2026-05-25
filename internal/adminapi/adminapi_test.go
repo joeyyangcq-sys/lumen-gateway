@@ -9,6 +9,7 @@ import (
 
 	"github.com/cloudwego/hertz/pkg/app"
 
+	"github.com/joey/lumen-gateway/internal/bootstrap"
 	"github.com/joey/lumen-gateway/internal/controlplane"
 )
 
@@ -453,6 +454,224 @@ func TestHandlerControlSchema(t *testing.T) {
 			t.Fatalf("schema body missing %s: %s", needle, body)
 		}
 	}
+}
+
+func TestHandlerErrorAndEdgeCases(t *testing.T) {
+	svc := &fakeService{
+		validateResourceResult: controlplane.ValidationResult{Valid: true},
+	}
+	handler := NewWithService(svc, "secret")
+
+	// 1. CORS Preflight
+	t.Run("CORS preflight OPTIONS", func(t *testing.T) {
+		c := newRequestContext("OPTIONS", "/apisix/admin/routes", nil)
+		handler.ServeHTTP(context.Background(), c)
+		if got := c.Response.StatusCode(); got != 204 {
+			t.Fatalf("status = %d, want 204", got)
+		}
+		if got := string(c.Response.Header.Peek("Access-Control-Allow-Origin")); got != "*" {
+			t.Fatalf("CORS origin = %q, want *", got)
+		}
+	})
+
+	// 2. Control Unauthorized
+	t.Run("control unauthorized", func(t *testing.T) {
+		c := newRequestContext("POST", "/apisix/admin/control/validate", nil)
+		handler.ServeHTTP(context.Background(), c)
+		if got := c.Response.StatusCode(); got != 401 {
+			t.Fatalf("status = %d, want 401", got)
+		}
+	})
+
+	// 3. Unsupported control path
+	t.Run("unsupported control path", func(t *testing.T) {
+		c := newRequestContext("GET", "/apisix/admin/control/nonexistent", nil)
+		c.Request.Header.Set("X-API-KEY", "secret")
+		handler.ServeHTTP(context.Background(), c)
+		if got := c.Response.StatusCode(); got != 404 {
+			t.Fatalf("status = %d, want 404", got)
+		}
+	})
+
+	// 4. Unsupported admin path
+	t.Run("unsupported admin path format", func(t *testing.T) {
+		c := newRequestContext("GET", "/apisix/admin/invalid/format/path", nil)
+		c.Request.Header.Set("X-API-KEY", "secret")
+		handler.ServeHTTP(context.Background(), c)
+		if got := c.Response.StatusCode(); got != 404 {
+			t.Fatalf("status = %d, want 404", got)
+		}
+	})
+
+	// 5. Unsupported resource kind
+	t.Run("unsupported resource kind", func(t *testing.T) {
+		c := newRequestContext("GET", "/apisix/admin/invalid_kind", nil)
+		c.Request.Header.Set("X-API-KEY", "secret")
+		handler.ServeHTTP(context.Background(), c)
+		if got := c.Response.StatusCode(); got != 404 {
+			t.Fatalf("status = %d, want 404", got)
+		}
+	})
+
+	// 6. Unsupported method
+	t.Run("unsupported method", func(t *testing.T) {
+		c := newRequestContext("TRACE", "/apisix/admin/routes/1", nil)
+		c.Request.Header.Set("X-API-KEY", "secret")
+		handler.ServeHTTP(context.Background(), c)
+		if got := c.Response.StatusCode(); got != 405 {
+			t.Fatalf("status = %d, want 405", got)
+		}
+	})
+
+	// 7. POST with ID
+	t.Run("post with id is bad request", func(t *testing.T) {
+		c := newRequestContext("POST", "/apisix/admin/routes/1", []byte(`{}`))
+		c.Request.Header.Set("X-API-KEY", "secret")
+		handler.ServeHTTP(context.Background(), c)
+		if got := c.Response.StatusCode(); got != 400 {
+			t.Fatalf("status = %d, want 400", got)
+		}
+	})
+
+	// 8. PUT without ID
+	t.Run("put without id is bad request", func(t *testing.T) {
+		c := newRequestContext("PUT", "/apisix/admin/routes", []byte(`{}`))
+		c.Request.Header.Set("X-API-KEY", "secret")
+		handler.ServeHTTP(context.Background(), c)
+		if got := c.Response.StatusCode(); got != 400 {
+			t.Fatalf("status = %d, want 400", got)
+		}
+	})
+
+	// 9. Validation failure returns 422
+	t.Run("validateBeforeWrite returns 422", func(t *testing.T) {
+		svc.validateResourceResult = controlplane.ValidationResult{
+			Valid:  false,
+			Issues: []controlplane.ValidationIssue{{Message: "validation failed custom message"}},
+		}
+		c := newRequestContext("POST", "/apisix/admin/routes", []byte(`{"uri":"/demo"}`))
+		c.Request.Header.Set("X-API-KEY", "secret")
+		handler.ServeHTTP(context.Background(), c)
+		if got := c.Response.StatusCode(); got != 422 {
+			t.Fatalf("status = %d, want 422, got %d", got, c.Response.StatusCode())
+		}
+		if !strings.Contains(string(c.Response.Body()), "validation failed custom message") {
+			t.Fatalf("body = %s", c.Response.Body())
+		}
+		// restore
+		svc.validateResourceResult = controlplane.ValidationResult{Valid: true}
+	})
+
+	// 10. Decode validate request error
+	t.Run("decode validate request bad JSON", func(t *testing.T) {
+		c := newRequestContext("POST", "/apisix/admin/control/validate", []byte(`invalid json`))
+		c.Request.Header.Set("X-API-KEY", "secret")
+		handler.ServeHTTP(context.Background(), c)
+		if got := c.Response.StatusCode(); got != 400 {
+			t.Fatalf("status = %d, want 400", got)
+		}
+	})
+
+	// 11. Decode validate request invalid fields
+	t.Run("decode validate request empty values", func(t *testing.T) {
+		c := newRequestContext("POST", "/apisix/admin/control/validate", []byte(`{}`))
+		c.Request.Header.Set("X-API-KEY", "secret")
+		handler.ServeHTTP(context.Background(), c)
+		if got := c.Response.StatusCode(); got != 400 {
+			t.Fatalf("status = %d, want 400", got)
+		}
+	})
+
+	t.Run("decode validate request kind without resource", func(t *testing.T) {
+		c := newRequestContext("POST", "/apisix/admin/control/validate", []byte(`{"kind":"routes"}`))
+		c.Request.Header.Set("X-API-KEY", "secret")
+		handler.ServeHTTP(context.Background(), c)
+		if got := c.Response.StatusCode(); got != 400 {
+			t.Fatalf("status = %d, want 400", got)
+		}
+	})
+
+	// 12. Decode bundle request errors
+	t.Run("decode bundle request bad JSON", func(t *testing.T) {
+		c := newRequestContext("POST", "/apisix/admin/control/imports/preview", []byte(`invalid json`))
+		c.Request.Header.Set("X-API-KEY", "secret")
+		handler.ServeHTTP(context.Background(), c)
+		if got := c.Response.StatusCode(); got != 400 {
+			t.Fatalf("status = %d, want 400", got)
+		}
+	})
+
+	t.Run("decode bundle request empty fields", func(t *testing.T) {
+		c := newRequestContext("POST", "/apisix/admin/control/imports/preview", []byte(`{}`))
+		c.Request.Header.Set("X-API-KEY", "secret")
+		handler.ServeHTTP(context.Background(), c)
+		if got := c.Response.StatusCode(); got != 400 {
+			t.Fatalf("status = %d, want 400", got)
+		}
+	})
+
+	// 13. Export unsupported format
+	t.Run("export unsupported format", func(t *testing.T) {
+		c := newRequestContext("GET", "/apisix/admin/control/exports?format=invalid", nil)
+		c.Request.Header.Set("X-API-KEY", "secret")
+		handler.ServeHTTP(context.Background(), c)
+		if got := c.Response.StatusCode(); got != 400 {
+			t.Fatalf("status = %d, want 400", got)
+		}
+	})
+
+	// 14. History list invalid limit format
+	t.Run("history list invalid limit", func(t *testing.T) {
+		c := newRequestContext("GET", "/apisix/admin/control/history?limit=invalid", nil)
+		c.Request.Header.Set("X-API-KEY", "secret")
+		handler.ServeHTTP(context.Background(), c)
+		if got := c.Response.StatusCode(); got != 200 {
+			t.Fatalf("status = %d, want 200", got)
+		}
+	})
+
+	// 15. History rollback invalid ID
+	t.Run("history rollback missing ID", func(t *testing.T) {
+		c := newRequestContext("POST", "/apisix/admin/control/history//rollback", nil)
+		c.Request.Header.Set("X-API-KEY", "secret")
+		handler.handleHistoryRollback(context.Background(), c, "history//rollback")
+		if got := c.Response.StatusCode(); got != 400 {
+			t.Fatalf("status = %d, want 400", got)
+		}
+	})
+
+	// 16. handler stats API
+	t.Run("stats API", func(t *testing.T) {
+		c := newRequestContext("GET", "/apisix/admin/control/stats", nil)
+		c.Request.Header.Set("X-API-KEY", "secret")
+		handler.ServeHTTP(context.Background(), c)
+		if got := c.Response.StatusCode(); got != 200 {
+			t.Fatalf("status = %d, want 200", got)
+		}
+	})
+
+	// 17. Handler Close
+	t.Run("close", func(t *testing.T) {
+		err := handler.Close()
+		if err != nil {
+			t.Fatalf("Close error: %v", err)
+		}
+	})
+
+	// 18. New Handler with Source checks
+	t.Run("New Handler source checks", func(t *testing.T) {
+		h, err := New(bootstrap.Options{
+			Gateway: bootstrap.GatewayOptions{
+				Source: "file",
+			},
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if h != nil {
+			t.Error("expected nil handler when source is not etcd_apisix")
+		}
+	})
 }
 
 type fakeService struct {

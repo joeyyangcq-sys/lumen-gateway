@@ -52,9 +52,9 @@ type ProxyInfo struct {
 }
 
 type histogramSnapshot struct {
+	Buckets map[float64]uint64
 	Count   uint64
 	Sum     float64
-	Buckets map[float64]uint64
 }
 
 type Snapshot struct {
@@ -69,11 +69,11 @@ type Snapshot struct {
 // GatewayStats is a pre-computed summary derived from the current snapshot.
 // Intended for the admin-UI overview — no Prometheus client required.
 type GatewayStats struct {
+	TopRoutes     []RouteStats `json:"top_routes"`
 	RequestsTotal uint64       `json:"requests_total"`
 	Errors4xx     uint64       `json:"errors_4xx"`
 	Errors5xx     uint64       `json:"errors_5xx"`
-	ErrorRate     float64      `json:"error_rate"` // 0–100 percent
-	TopRoutes     []RouteStats `json:"top_routes"`
+	ErrorRate     float64      `json:"error_rate"`
 }
 
 // RouteStats is per-route request and error counts.
@@ -94,23 +94,20 @@ type Recorder interface {
 }
 
 type MemoryRecorder struct {
-	mu sync.Mutex
-
-	pluginExecutions map[string]uint64
-	pluginDurations  map[string]*histogram
-
+	pluginExecutions  map[string]uint64
+	pluginDurations   map[string]*histogram
 	upstreamRequests  map[string]uint64
 	upstreamDurations map[string]*histogram
-
-	gatewayRequests  map[string]uint64
-	gatewayDurations map[string]*histogram
+	gatewayRequests   map[string]uint64
+	gatewayDurations  map[string]*histogram
+	mu                sync.Mutex
 }
 
 type histogram struct {
+	bins   map[float64]uint64
 	bounds []float64
 	count  uint64
 	sum    float64
-	bins   map[float64]uint64
 }
 
 var (

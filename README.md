@@ -1,11 +1,30 @@
+<!--
+#
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements.  See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License.  You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+-->
+
 # Lumen Gateway
 
 [![Go Version](https://img.shields.io/badge/go-1.25-00ADD8?logo=go)](go.mod)
-[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](../LICENSE)
 
-A pure-Go L7 API gateway — **low tail latency**, **APISIX-compatible Admin API**, **5-scope plugin chain**, and **zero-downtime hot reload** via etcd. Ships as a single ~15 MB binary with no Nginx, OpenResty, or LuaJIT dependency.
+Lumen Gateway is a pure-Go L7 API gateway providing **low tail latency**, an **APISIX-compatible Admin API**, a **5-scope plugin chain**, and **zero-downtime hot reload** via etcd. It ships as a single ~15 MB binary with no Nginx, OpenResty, or LuaJIT dependency.
 
-Developed as a showcase portfolio by **Joey Yang** (Senior Backend & Gateway Engineer) to demonstrate high-concurrency L7 traffic routing, lock-free state synchronization, and zero-allocation memory optimizations.
+Designed as a high-concurrency cloud-native data plane, Lumen Gateway features lock-free state synchronization, zero-allocation memory optimizations, and extensible middleware capabilities.
 
 ---
 
@@ -13,7 +32,7 @@ Developed as a showcase portfolio by **Joey Yang** (Senior Backend & Gateway Eng
 
 | Feature | Detail |
 |---------|--------|
-| **Low tail latency** | P99 30–44% lower than APISIX under comparable load |
+| **Performance-focused** | High throughput and stable latency characteristics |
 | **APISIX-compatible** | Admin API, etcd schema, and Bundle format fully compatible |
 | **Type-safe plugins** | `RegisterTypedContext[T]` generics — compile-time config validation |
 | **5-scope plugin chain** | `global → server → route → service → upstream` |
@@ -21,13 +40,12 @@ Developed as a showcase portfolio by **Joey Yang** (Senior Backend & Gateway Eng
 | **Single binary** | ~15 MB, no runtime dependencies |
 | **9 built-in plugins** | Rate limiting, request/response transformation, path rewriting, access log |
 
-### Monorepo & Portfolio Integration
-This project is the data-plane core of the **[Lumen Ecosystem](https://github.com/joeyyangcq-sys/lumen)**. It interfaces with **[Lumen OAuth](https://github.com/joeyyangcq-sys/lumen-oauth)** for auth/OIDC flows, **[Lumen MCP Server](https://github.com/joeyyangcq-sys/lumen-mcp-server)** for AI-native LLM control, and **[Lumen Admin UI](https://github.com/joeyyangcq-sys/lumen-admin-ui)**.
+### Monorepo Integration
+This project is the data-plane core of the **[Lumen Ecosystem](../README.md)**. It interfaces with **[Lumen OAuth](../lumen-oauth)** for auth/OIDC flows, **[Lumen MCP Server](../lumen-mcp-server)** for AI-native LLM control, and **[Lumen Admin UI](../lumen-admin-ui)**.
 
-### Resume Engineering Alignments
-- **Zero-Allocation Context**: Utilizes stack-allocation optimizations for request execution contexts (`0 bytes/request` overhead in the core proxy loop), reducing GC pauses and keeping tail latency uniform under heavy load.
-- **Lock-Free Configuration Swapping**: Implements local dual-buffer caching and Go `atomic.Pointer[Snapshot]` switches driven by etcd Pub/Sub, avoiding mutex contention on the fast read path.
-- **Aho-Corasick Multi-Pattern Path Matching**: Implements a high-efficiency URI mapping router using an AC-automaton, replacing expensive regex checks with $O(M)$ time complexity pattern matching.
+### Advanced Performance Optimizations
+- **Efficient Routing Context**: Utilizes optimized request execution contexts to reduce GC pauses and keep latency uniform under load.
+- **Lock-Free Configuration Swapping**: Implements Go `atomic.Pointer[Snapshot]` switches driven by configuration updates, avoiding mutex contention on the fast read path.
 
 ---
 
@@ -419,4 +437,4 @@ Pre-configured dashboards (via `deploy/`) include:
 
 ## License
 
-MIT — see [LICENSE](LICENSE)
+Licensed under the Apache License, Version 2.0. See the [LICENSE](../LICENSE) file for details.

@@ -25,11 +25,11 @@ import (
 )
 
 type Gateway struct {
-	options  config.Options
-	server   *server.Hertz
 	admin    AdminHandler
 	compiler RuntimeCompiler
+	server   *server.Hertz
 	snapshot atomic.Pointer[RuntimeSnapshot]
+	options  config.Options
 }
 
 type AdminHandler interface {
@@ -38,18 +38,17 @@ type AdminHandler interface {
 
 type RuntimeSnapshot struct {
 	Router         *router.Router
-	GlobalHandlers []app.HandlerFunc
-	ServerHandlers []app.HandlerFunc
 	RouteHandlers  map[string][]app.HandlerFunc
 	Services       map[string]*Service
 	Upstreams      map[string]*Upstream
+	drainedCh      chan struct{}
+	closedCh       chan struct{}
+	GlobalHandlers []app.HandlerFunc
+	ServerHandlers []app.HandlerFunc
 	closers        []io.Closer
-
-	state         atomic.Int32  // open, closing, or closed
-	inFlight      atomic.Int64  // requests currently holding this snapshot
-	drainSignaled atomic.Bool   // ensures drainedCh is closed exactly once
-	drainedCh     chan struct{} // closed when inFlight reaches 0 while closing
-	closedCh      chan struct{} // closed when all resources have been released
+	inFlight       atomic.Int64
+	state          atomic.Int32
+	drainSignaled  atomic.Bool
 }
 
 func newRuntimeSnapshot(closers ...io.Closer) *RuntimeSnapshot {
@@ -67,26 +66,26 @@ const (
 )
 
 type Service struct {
+	Proxy             proxy.Proxy
+	Upstream          *Upstream
 	ID                string
-	Options           config.ServiceOptions
 	Handlers          []app.HandlerFunc
 	ExecutionHandlers []app.HandlerFunc
-	Upstream          *Upstream
-	Proxy             proxy.Proxy
+	Options           config.ServiceOptions
 }
 
 type Upstream struct {
+	Balancer  balancer.Balancer
 	ID        string
-	Options   config.UpstreamOptions
 	Handlers  []app.HandlerFunc
 	Endpoints []*Endpoint
-	Balancer  balancer.Balancer
+	Options   config.UpstreamOptions
 }
 
 type Endpoint struct {
+	Tags      map[string]string
 	Addr      string
 	Load      uint32
-	Tags      map[string]string
 	Available bool
 }
 
@@ -444,9 +443,9 @@ func buildPluginHandlers(
 	refs []config.PluginRef,
 ) ([]app.HandlerFunc, error) {
 	type builtPlugin struct {
+		handler  app.HandlerFunc
 		index    int
 		priority int
-		handler  app.HandlerFunc
 	}
 
 	built := make([]builtPlugin, 0, len(refs))
@@ -538,8 +537,8 @@ func collectStdPromMetrics() string {
 }
 
 type metricsResponseWriter struct {
-	body       bytes.Buffer
 	header     http.Header
+	body       bytes.Buffer
 	statusCode int
 }
 

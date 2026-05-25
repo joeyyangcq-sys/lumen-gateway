@@ -1,6 +1,7 @@
 package config
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
@@ -115,6 +116,155 @@ func TestValidateRejectsUnsupportedLoggingOptions(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateRejectsInvalidConfigurations(t *testing.T) {
+	t.Run("no servers", func(t *testing.T) {
+		opts := minimalOptions()
+		opts.Servers = nil
+		if err := opts.Validate(); err == nil || !strings.Contains(err.Error(), "at least one server is required") {
+			t.Errorf("expected server requirement error, got %v", err)
+		}
+	})
+
+	t.Run("empty server listen", func(t *testing.T) {
+		opts := minimalOptions()
+		s := opts.Servers["main"]
+		s.Listen = ""
+		opts.Servers["main"] = s
+		if err := opts.Validate(); err == nil || !strings.Contains(err.Error(), "listen cannot be empty") {
+			t.Errorf("expected server listen error, got %v", err)
+		}
+	})
+
+	t.Run("empty route paths", func(t *testing.T) {
+		opts := minimalOptions()
+		r := opts.Routes["user-api"]
+		r.Paths = nil
+		opts.Routes["user-api"] = r
+		if err := opts.Validate(); err == nil || !strings.Contains(err.Error(), "paths cannot be empty") {
+			t.Errorf("expected route paths error, got %v", err)
+		}
+	})
+
+	t.Run("empty route service", func(t *testing.T) {
+		opts := minimalOptions()
+		r := opts.Routes["user-api"]
+		r.Service = ""
+		opts.Routes["user-api"] = r
+		if err := opts.Validate(); err == nil || !strings.Contains(err.Error(), "service cannot be empty") {
+			t.Errorf("expected route service error, got %v", err)
+		}
+	})
+
+	t.Run("empty service upstream", func(t *testing.T) {
+		opts := minimalOptions()
+		s := opts.Services["user-service"]
+		s.Upstream = ""
+		opts.Services["user-service"] = s
+		if err := opts.Validate(); err == nil || !strings.Contains(err.Error(), "upstream cannot be empty") {
+			t.Errorf("expected service upstream error, got %v", err)
+		}
+	})
+
+	t.Run("empty upstream endpoints", func(t *testing.T) {
+		opts := minimalOptions()
+		u := opts.Upstreams["user-upstream"]
+		u.Endpoints = nil
+		opts.Upstreams["user-upstream"] = u
+		if err := opts.Validate(); err == nil || !strings.Contains(err.Error(), "endpoints cannot be empty") {
+			t.Errorf("expected upstream endpoints error, got %v", err)
+		}
+	})
+
+	t.Run("unsupported upstream pass_host", func(t *testing.T) {
+		opts := minimalOptions()
+		u := opts.Upstreams["user-upstream"]
+		u.PassHost = "invalid"
+		opts.Upstreams["user-upstream"] = u
+		if err := opts.Validate(); err == nil || !strings.Contains(err.Error(), "pass_host \"invalid\" is not supported") {
+			t.Errorf("expected pass_host error, got %v", err)
+		}
+	})
+
+	t.Run("empty endpoint address", func(t *testing.T) {
+		opts := minimalOptions()
+		u := opts.Upstreams["user-upstream"]
+		u.Endpoints = []EndpointOptions{{Address: ""}}
+		opts.Upstreams["user-upstream"] = u
+		if err := opts.Validate(); err == nil || !strings.Contains(err.Error(), "endpoint address cannot be empty") {
+			t.Errorf("expected endpoint address error, got %v", err)
+		}
+	})
+
+	t.Run("empty plugin ref name", func(t *testing.T) {
+		opts := minimalOptions()
+		r := opts.Routes["user-api"]
+		r.Plugins = []PluginRef{{Name: ""}}
+		opts.Routes["user-api"] = r
+		if err := opts.Validate(); err == nil || !strings.Contains(err.Error(), "plugin name cannot be empty") {
+			t.Errorf("expected plugin name error, got %v", err)
+		}
+	})
+}
+
+func TestLoadConfiguration(t *testing.T) {
+	t.Run("non-existent file", func(t *testing.T) {
+		_, err := Load("non-existent.yaml")
+		if err == nil {
+			t.Error("expected error for non-existent file")
+		}
+	})
+
+	t.Run("invalid yaml", func(t *testing.T) {
+		// Create a temporary invalid yaml file
+		tmpFile, err := os.CreateTemp("", "invalid-*.yaml")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer os.Remove(tmpFile.Name())
+		_, _ = tmpFile.WriteString("servers: [invalid")
+		_ = tmpFile.Close()
+
+		_, err = Load(tmpFile.Name())
+		if err == nil {
+			t.Error("expected error for invalid yaml")
+		}
+	})
+
+	t.Run("success", func(t *testing.T) {
+		tmpFile, err := os.CreateTemp("", "valid-*.yaml")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer os.Remove(tmpFile.Name())
+		_, _ = tmpFile.WriteString(`
+servers:
+  main:
+    listen: :8080
+routes:
+  user-api:
+    paths: [/api/users]
+    service: user-service
+services:
+  user-service:
+    upstream: user-upstream
+upstreams:
+  user-upstream:
+    endpoints:
+      - address: 127.0.0.1:9001
+`)
+		_ = tmpFile.Close()
+
+		opts, err := Load(tmpFile.Name())
+		if err != nil {
+			t.Fatalf("expected no error, got %v", err)
+		}
+		if opts.Servers["main"].ID != "main" {
+			t.Errorf("expected server ID to be main, got %q", opts.Servers["main"].ID)
+		}
+	})
+}
+
 
 func minimalOptions() Options {
 	return Options{

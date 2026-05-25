@@ -48,8 +48,8 @@ type DeleteResult struct {
 }
 
 type ApplyOptions struct {
-	Prune      bool
 	PruneKinds []ResourceKind
+	Prune      bool
 }
 
 type Store interface {
@@ -65,8 +65,8 @@ type Option func(*Service)
 type Service struct {
 	store         Store
 	history       HistoryStore
-	historyLimit  int
 	exportOptions ExportOptions
+	historyLimit  int
 }
 
 func New(store Store, opts ...Option) *Service {

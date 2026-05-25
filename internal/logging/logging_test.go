@@ -37,3 +37,52 @@ func TestParseRejectsUnsupportedOptions(t *testing.T) {
 		t.Fatal("ParseFormat() error = nil, want unsupported format")
 	}
 }
+
+func TestConfigureAndErrors(t *testing.T) {
+	// 1. 测试 Configure 接口
+	err := Configure(config.LoggingOptions{
+		Level:  "info",
+		Format: "text",
+	})
+	if err != nil {
+		t.Errorf("Configure failed: %v", err)
+	}
+
+	// 2. 测试 writer == nil 的情况
+	err = ConfigureWithWriter(config.LoggingOptions{
+		Level:  "info",
+		Format: "text",
+	}, nil)
+	if err != nil {
+		t.Errorf("ConfigureWithWriter with nil writer failed: %v", err)
+	}
+
+	// 3. 测试 UnsupportedOptionError.Error() 方法
+	errOption := &UnsupportedOptionError{
+		Field: "logging.level",
+		Value: "trace",
+	}
+	expectedMsg := `logging.level "trace" is not supported`
+	if errOption.Error() != expectedMsg {
+		t.Errorf("expected error message %q, got %q", expectedMsg, errOption.Error())
+	}
+
+	// 4. 测试 ParseLevel 所有的有效级别
+	levels := []string{"info", "", "debug", "warn", "warning", "error"}
+	for _, l := range levels {
+		_, err := ParseLevel(l)
+		if err != nil {
+			t.Errorf("ParseLevel(%q) failed: %v", l, err)
+		}
+	}
+
+	// 5. 测试 ParseFormat 所有的有效格式
+	formats := []string{"text", "", "json"}
+	for _, f := range formats {
+		_, err := ParseFormat(f)
+		if err != nil {
+			t.Errorf("ParseFormat(%q) failed: %v", f, err)
+		}
+	}
+}
+

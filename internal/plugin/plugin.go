@@ -22,15 +22,15 @@ const (
 
 type Metadata struct {
 	Name     string
-	Priority int
 	Scopes   []Scope
+	Priority int
 }
 
 type Factory func(params any) (app.HandlerFunc, error)
 
 type Definition struct {
-	metadata Metadata
 	factory  Factory
+	metadata Metadata
 }
 
 func (d Definition) Metadata() Metadata {

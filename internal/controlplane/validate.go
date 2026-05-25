@@ -17,13 +17,13 @@ type ValidationIssue struct {
 }
 
 type ValidationResult struct {
-	Valid  bool              `json:"valid"`
 	Issues []ValidationIssue `json:"issues,omitempty"`
+	Valid  bool              `json:"valid"`
 }
 
 type ValidateOptions struct {
-	Prune      bool
 	PruneKinds []ResourceKind
+	Prune      bool
 }
 
 func (s *Service) ValidateBundle(ctx context.Context, bundle FileBundle, options ValidateOptions) (ValidationResult, error) {
@@ -318,7 +318,6 @@ func filterIssues(issues []ValidationIssue, kind ResourceKind, id string) []Vali
 	}
 	return out
 }
-
 
 func sortedMapKeys[T any](items map[string]T) []string {
 	keys := make([]string, 0, len(items))

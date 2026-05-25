@@ -54,3 +54,111 @@ func TestRouterRejectsEmptyRouteID(t *testing.T) {
 		t.Fatal("Add() error = nil, want error")
 	}
 }
+
+func TestRouterWildcardHost(t *testing.T) {
+	r := New()
+	_ = r.Add(config.RouteOptions{
+		ID:      "subdomain",
+		Hosts:   []string{"*.example.com"},
+		Paths:   []string{"/sub"},
+		Service: "svc",
+	})
+	_ = r.Add(config.RouteOptions{
+		ID:      "suffix",
+		Hosts:   []string{"example.*"},
+		Paths:   []string{"/suf"},
+		Service: "svc",
+	})
+
+	if _, ok := r.Match("GET", "api.example.com", "/sub"); !ok {
+		t.Error("expected match for *.example.com")
+	}
+	if _, ok := r.Match("GET", "example.com", "/sub"); ok {
+		t.Error("expected no match for *.example.com on exact example.com")
+	}
+	if _, ok := r.Match("GET", "example.org", "/suf"); !ok {
+		t.Error("expected match for example.*")
+	}
+}
+
+func TestIsValidMethod(t *testing.T) {
+	if !IsValidMethod("GET") || !IsValidMethod("post") || !IsValidMethod("DELETE") {
+		t.Error("expected valid HTTP methods to pass")
+	}
+	if IsValidMethod("INVALID") || IsValidMethod("") {
+		t.Error("expected invalid HTTP methods to fail")
+	}
+}
+
+func TestRouterPathMatching(t *testing.T) {
+	r := New()
+	_ = r.Add(config.RouteOptions{
+		ID:      "regex_case",
+		Paths:   []string{"~* ^/users/[0-9]+$"},
+		Service: "svc",
+	})
+	_ = r.Add(config.RouteOptions{
+		ID:      "regex_exact",
+		Paths:   []string{"~ ^/orders/[0-9]+$"},
+		Service: "svc",
+	})
+	_ = r.Add(config.RouteOptions{
+		ID:      "apisix_prefix",
+		Paths:   []string{"/foo/*"},
+		Service: "svc",
+	})
+	_ = r.Add(config.RouteOptions{
+		ID:      "apisix_prefix_no_slash",
+		Paths:   []string{"/bar*"},
+		Service: "svc",
+	})
+
+	// Test regex case-insensitive
+	if _, ok := r.Match("GET", "", "/USERS/123"); !ok {
+		t.Error("expected match for case-insensitive regex")
+	}
+	// Test regex case-sensitive
+	if _, ok := r.Match("GET", "", "/ORDERS/123"); ok {
+		t.Error("expected no match for case-sensitive regex on uppercase path")
+	}
+	if _, ok := r.Match("GET", "", "/orders/123"); !ok {
+		t.Error("expected match for case-sensitive regex")
+	}
+	// Test apisix prefix
+	if _, ok := r.Match("GET", "", "/foo/bar"); !ok {
+		t.Error("expected match for /foo/*")
+	}
+	if _, ok := r.Match("GET", "", "/bar/baz"); !ok {
+		t.Error("expected match for /bar*")
+	}
+}
+
+func TestRouterCompileErrors(t *testing.T) {
+	r := New()
+	// Empty path
+	if err := r.Add(config.RouteOptions{ID: "r1", Paths: []string{""}}); err == nil {
+		t.Error("expected error for empty path")
+	}
+	// Empty paths list
+	if err := r.Add(config.RouteOptions{ID: "r1", Paths: []string{}}); err == nil {
+		t.Error("expected error for empty paths list")
+	}
+	// Invalid regex
+	if err := r.Add(config.RouteOptions{ID: "r1", Paths: []string{"~ ["}}); err == nil {
+		t.Error("expected error for invalid regex")
+	}
+	if err := r.Add(config.RouteOptions{ID: "r1", Paths: []string{"~* ["}}); err == nil {
+		t.Error("expected error for invalid regex case-insensitive")
+	}
+	// Empty regex
+	if err := r.Add(config.RouteOptions{ID: "r1", Paths: []string{"~ "}}); err == nil {
+		t.Error("expected error for empty regex")
+	}
+	if err := r.Add(config.RouteOptions{ID: "r1", Paths: []string{"~*"}}); err == nil {
+		t.Error("expected error for empty regex 2")
+	}
+	if err := r.Add(config.RouteOptions{ID: "r1", Paths: []string{"~"}}); err == nil {
+		t.Error("expected error for empty regex 3")
+	}
+}
+
