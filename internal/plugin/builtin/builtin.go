@@ -156,19 +156,19 @@ func registerRewritePathRegex(registry *plugin.Registry) error {
 }
 
 type responseTransformerConfig struct {
-	Status      int    `yaml:"status"`
-	Body        string `yaml:"body"`
-	BodyBase64  bool   `yaml:"body_base64"`
-	ContentType string `yaml:"content_type"`
-	Add         struct {
+	Add struct {
 		Headers map[string]string `yaml:"headers"`
 	} `yaml:"add"`
 	Set struct {
 		Headers map[string]string `yaml:"headers"`
 	} `yaml:"set"`
-	Remove struct {
+	Body        string `yaml:"body"`
+	ContentType string `yaml:"content_type"`
+	Remove      struct {
 		Headers []string `yaml:"headers"`
 	} `yaml:"remove"`
+	Status     int  `yaml:"status"`
+	BodyBase64 bool `yaml:"body_base64"`
 }
 
 func registerResponseTransformer(registry *plugin.Registry) error {
@@ -240,8 +240,8 @@ func registerReplacePath(registry *plugin.Registry) error {
 }
 
 type stripPrefixConfig struct {
-	Prefixes []string `yaml:"prefixes"`
 	Prefix   string   `yaml:"prefix"`
+	Prefixes []string `yaml:"prefixes"`
 }
 
 func registerStripPrefix(registry *plugin.Registry) error {

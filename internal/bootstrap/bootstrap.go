@@ -26,11 +26,11 @@ type AdminOptions struct {
 }
 
 type EtcdOptions struct {
-	Endpoints   []string      `yaml:"endpoints"`
 	Prefix      string        `yaml:"prefix"`
-	DialTimeout time.Duration `yaml:"dial_timeout"`
 	Username    string        `yaml:"username"`
 	Password    string        `yaml:"password"`
+	Endpoints   []string      `yaml:"endpoints"`
+	DialTimeout time.Duration `yaml:"dial_timeout"`
 }
 
 type FileOptions struct {

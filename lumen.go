@@ -123,13 +123,13 @@ func (o *options) buildCompilerOpts() []gateway.CompilerOption {
 }
 
 type options struct {
+	init          func(bootstrap.Options) error
+	balancerTypes map[string]func([]internalbalancer.Endpoint, any) (internalbalancer.Balancer, error)
 	version       string
 	build         string
 	flags         []cli.Flag
-	init          func(bootstrap.Options) error
 	compilerOpts  []gateway.CompilerOption
 	pluginRegs    []func(*internalplugin.Registry) error
-	balancerTypes map[string]func([]internalbalancer.Endpoint, any) (internalbalancer.Balancer, error)
 }
 
 type Option func(*options)

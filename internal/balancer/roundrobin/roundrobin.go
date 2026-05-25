@@ -9,9 +9,9 @@ import (
 )
 
 type Balancer struct {
+	endpoints []balancer.Endpoint
 	next      atomic.Uint64
 	mu        sync.RWMutex
-	endpoints []balancer.Endpoint
 }
 
 func New(endpoints []balancer.Endpoint, _ any) (balancer.Balancer, error) {

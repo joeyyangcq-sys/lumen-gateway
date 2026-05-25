@@ -18,16 +18,16 @@ const (
 )
 
 type ChangeItem struct {
+	Summary     map[string]any  `json:"summary,omitempty"`
 	Kind        ResourceKind    `json:"kind"`
 	ID          string          `json:"id"`
 	Action      ChangeAction    `json:"action"`
 	Title       string          `json:"title,omitempty"`
-	Summary     map[string]any  `json:"summary,omitempty"`
+	PruneSource string          `json:"prune_source,omitempty"`
 	Warnings    []string        `json:"warnings,omitempty"`
 	Before      json.RawMessage `json:"before,omitempty"`
 	After       json.RawMessage `json:"after,omitempty"`
 	Managed     bool            `json:"managed"`
-	PruneSource string          `json:"prune_source,omitempty"`
 }
 
 type PlanSummary struct {
@@ -44,8 +44,8 @@ type ApplyPlan struct {
 }
 
 type PreviewOptions struct {
-	Prune            bool
 	PruneKinds       []ResourceKind
+	Prune            bool
 	IncludeUnchanged bool
 }
 

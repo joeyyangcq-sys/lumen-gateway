@@ -10,15 +10,15 @@ import (
 )
 
 type limitCountConfig struct {
-	Count                int    `yaml:"count"`
-	TimeWindow           int    `yaml:"time_window"`
+	ShowLimitQuotaHeader *bool  `yaml:"show_limit_quota_header"`
 	KeyType              string `yaml:"key_type"`
 	Key                  string `yaml:"key"`
-	RejectedCode         int    `yaml:"rejected_code"`
 	RejectedMsg          string `yaml:"rejected_msg"`
 	Policy               string `yaml:"policy"`
-	ShowLimitQuotaHeader *bool  `yaml:"show_limit_quota_header"`
 	Group                string `yaml:"group"`
+	Count                int    `yaml:"count"`
+	TimeWindow           int    `yaml:"time_window"`
+	RejectedCode         int    `yaml:"rejected_code"`
 }
 
 type limitCountBucket struct {

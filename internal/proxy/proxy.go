@@ -59,8 +59,8 @@ type Proxy interface {
 }
 
 type HTTPOptions struct {
-	Timeout   config.TimeoutOptions
 	Transport http.RoundTripper
+	Timeout   config.TimeoutOptions
 }
 
 type HTTPProxy struct {
@@ -219,23 +219,20 @@ func isHopByHopHeader(key string) bool {
 }
 
 type traceTimings struct {
-	target observability.ProxyInfo
-
-	start time.Time
-
+	gotConnAt         time.Time
+	bodyReadDoneAt    time.Time
 	connectStart      time.Time
 	connectDone       time.Time
 	tlsHandshakeStart time.Time
 	tlsHandshakeDone  time.Time
-	gotConnAt         time.Time
-	wroteRequestAt    time.Time
 	firstByteAt       time.Time
-	bodyReadDoneAt    time.Time
-
-	connectErr error
-	tlsErr     error
-	writeErr   error
-	reusedConn bool
+	wroteRequestAt    time.Time
+	start             time.Time
+	writeErr          error
+	connectErr        error
+	tlsErr            error
+	target            observability.ProxyInfo
+	reusedConn        bool
 }
 
 func newTraceTimings(target Target) *traceTimings {

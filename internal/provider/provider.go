@@ -16,8 +16,8 @@ import (
 )
 
 type Update struct {
-	Options config.Options
 	Err     error
+	Options config.Options
 }
 
 type Source interface {

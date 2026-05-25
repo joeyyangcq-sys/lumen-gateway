@@ -84,27 +84,40 @@ func matchHost(hosts []string, host string) bool {
 	if len(hosts) == 0 {
 		return true
 	}
-	host = strings.ToLower(host)
 	for _, h := range hosts {
 		if strings.EqualFold(h, host) {
 			return true
 		}
 		// Very small wildcard support: "*.example.com"
 		if strings.HasPrefix(h, "*.") {
-			suffix := strings.ToLower(strings.TrimPrefix(h, "*."))
-			if suffix != "" && strings.HasSuffix(host, "."+suffix) {
+			suffix := h[2:]
+			if suffix != "" && len(host) > len(suffix) && host[len(host)-len(suffix)-1] == '.' && hasSuffixFold(host, suffix) {
 				return true
 			}
 		}
 		// Very small wildcard support: "example.*"
 		if strings.HasSuffix(h, ".*") {
-			prefix := strings.ToLower(strings.TrimSuffix(h, ".*"))
-			if prefix != "" && strings.HasPrefix(host, prefix+".") {
+			prefix := h[:len(h)-2]
+			if prefix != "" && len(host) > len(prefix) && host[len(prefix)] == '.' && hasPrefixFold(host, prefix) {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+func hasSuffixFold(s, suffix string) bool {
+	if len(s) < len(suffix) {
+		return false
+	}
+	return strings.EqualFold(s[len(s)-len(suffix):], suffix)
+}
+
+func hasPrefixFold(s, prefix string) bool {
+	if len(s) < len(prefix) {
+		return false
+	}
+	return strings.EqualFold(s[:len(prefix)], prefix)
 }
 
 func IsValidMethod(method string) bool {
@@ -127,10 +140,10 @@ const (
 )
 
 type compiledPath struct {
-	kind        pathKind
+	regex       *regexp.Regexp
 	exact       string
 	prefix      string
-	regex       *regexp.Regexp
+	kind        pathKind
 	specificity int
 }
 

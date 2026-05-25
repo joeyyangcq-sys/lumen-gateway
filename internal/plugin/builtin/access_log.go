@@ -23,17 +23,17 @@ const (
 type accessLogConfig struct {
 	Path          string `yaml:"path"`
 	Format        string `yaml:"format"`
-	BufferSize    int    `yaml:"buffer_size"`
 	FlushInterval string `yaml:"flush_interval"`
+	BufferSize    int    `yaml:"buffer_size"`
 }
 
 type accessLogWriter struct {
-	mu       sync.Mutex
 	file     *os.File
 	writer   *bufio.Writer
 	stopCh   chan struct{}
 	doneCh   chan struct{}
 	stopOnce sync.Once
+	mu       sync.Mutex
 	closed   bool
 }
 

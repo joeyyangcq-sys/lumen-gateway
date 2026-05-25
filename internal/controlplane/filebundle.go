@@ -12,8 +12,8 @@ import (
 )
 
 type FileBundle struct {
-	Meta      BundleMeta
 	Resources map[ResourceKind]map[string]json.RawMessage
+	Meta      BundleMeta
 }
 
 type BundleMeta struct {
@@ -53,10 +53,10 @@ type ExportOptions struct {
 }
 
 type SyncOptions struct {
+	OnApply      func(ApplyResult)
+	PruneKinds   []ResourceKind
 	PollInterval time.Duration
 	Prune        bool
-	PruneKinds   []ResourceKind
-	OnApply      func(ApplyResult)
 }
 
 func LoadBundleFile(path string) (FileBundle, error) {

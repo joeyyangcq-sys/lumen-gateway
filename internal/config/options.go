@@ -11,13 +11,13 @@ import (
 )
 
 type Options struct {
-	GlobalPlugins []PluginRef                `yaml:"global_plugins"`
 	Servers       map[string]ServerOptions   `yaml:"servers"`
 	Routes        map[string]RouteOptions    `yaml:"routes"`
 	Services      map[string]ServiceOptions  `yaml:"services"`
 	Upstreams     map[string]UpstreamOptions `yaml:"upstreams"`
 	Plugins       map[string]PluginOptions   `yaml:"plugins"`
 	Logging       LoggingOptions             `yaml:"logging"`
+	GlobalPlugins []PluginRef                `yaml:"global_plugins"`
 }
 
 type LoggingOptions struct {
@@ -33,20 +33,20 @@ type ServerOptions struct {
 
 type RouteOptions struct {
 	ID       string      `yaml:"-"`
+	Service  string      `yaml:"service"`
 	Hosts    []string    `yaml:"hosts"`
 	Methods  []string    `yaml:"methods"`
 	Paths    []string    `yaml:"paths"`
-	Priority int         `yaml:"priority"`
-	Service  string      `yaml:"service"`
 	Plugins  []PluginRef `yaml:"plugins"`
+	Priority int         `yaml:"priority"`
 }
 
 type ServiceOptions struct {
 	ID       string         `yaml:"-"`
 	Protocol string         `yaml:"protocol"`
 	Upstream string         `yaml:"upstream"`
-	Timeout  TimeoutOptions `yaml:"timeout"`
 	Plugins  []PluginRef    `yaml:"plugins"`
+	Timeout  TimeoutOptions `yaml:"timeout"`
 }
 
 type TimeoutOptions struct {
@@ -56,25 +56,25 @@ type TimeoutOptions struct {
 }
 
 type UpstreamOptions struct {
-	ID           string             `yaml:"-"`
 	Balancer     BalancerOptions    `yaml:"balancer"`
-	HealthCheck  HealthCheckOptions `yaml:"health_check"`
+	ID           string             `yaml:"-"`
 	Scheme       string             `yaml:"scheme"`
 	PassHost     string             `yaml:"pass_host"`
 	UpstreamHost string             `yaml:"upstream_host"`
-	Timeout      TimeoutOptions     `yaml:"timeout"`
 	Endpoints    []EndpointOptions  `yaml:"endpoints"`
 	Plugins      []PluginRef        `yaml:"plugins"`
+	HealthCheck  HealthCheckOptions `yaml:"health_check"`
+	Timeout      TimeoutOptions     `yaml:"timeout"`
 }
 
 type BalancerOptions struct {
-	Type   string `yaml:"type"`
 	Params any    `yaml:"params"`
+	Type   string `yaml:"type"`
 }
 
 type HealthCheckOptions struct {
-	Passive PassiveHealthOptions `yaml:"passive"`
 	Active  ActiveHealthOptions  `yaml:"active"`
+	Passive PassiveHealthOptions `yaml:"passive"`
 }
 
 type PassiveHealthOptions struct {
@@ -89,21 +89,21 @@ type ActiveHealthOptions struct {
 }
 
 type EndpointOptions struct {
+	Tags    map[string]string `yaml:"tags"`
 	Address string            `yaml:"address"`
 	Weight  uint32            `yaml:"weight"`
-	Tags    map[string]string `yaml:"tags"`
 }
 
 type PluginOptions struct {
+	Params any    `yaml:"params"`
 	ID     string `yaml:"-"`
 	Name   string `yaml:"name"`
-	Params any    `yaml:"params"`
 }
 
 type PluginRef struct {
+	Params any    `yaml:"params"`
 	Use    string `yaml:"use"`
 	Name   string `yaml:"name"`
-	Params any    `yaml:"params"`
 }
 
 func Load(path string) (Options, error) {

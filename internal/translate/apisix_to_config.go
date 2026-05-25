@@ -605,10 +605,10 @@ func decodeProxyRewriteHeaders(raw json.RawMessage) (struct {
 
 func translateResponseRewrite(raw json.RawMessage) ([]config.PluginRef, error) {
 	type responseRewrite struct {
-		StatusCode int             `json:"status_code"`
 		Body       string          `json:"body"`
-		BodyBase64 bool            `json:"body_base64"`
 		Headers    json.RawMessage `json:"headers"`
+		StatusCode int             `json:"status_code"`
+		BodyBase64 bool            `json:"body_base64"`
 	}
 
 	cfg := responseRewrite{}
