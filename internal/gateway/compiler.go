@@ -2,7 +2,6 @@ package gateway
 
 import (
 	"fmt"
-	"io"
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/joey/lumen-gateway/internal/balancer"
