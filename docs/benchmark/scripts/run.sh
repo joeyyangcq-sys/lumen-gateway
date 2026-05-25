@@ -27,7 +27,8 @@ GATEWAYS=("lumen" "apisix")
 
 LUMEN_CONTAINER="bench-lumen"
 APISIX_CONTAINER="bench-apisix"
-APISIX_ADMIN="http://localhost:9180"
+APISIX_PROXY_URL="${APISIX_PROXY_URL:-http://localhost:${APISIX_PROXY_PORT:-9080}}"
+APISIX_ADMIN="${APISIX_ADMIN:-http://localhost:${APISIX_ADMIN_PORT:-9180}}"
 APISIX_KEY="benchmark-admin-key"
 
 COMPOSE="docker compose -f $BENCH_DIR/docker-compose.yml"
@@ -39,7 +40,7 @@ command -v k6 >/dev/null 2>&1 || { echo "k6 not found. Run: brew install k6"; ex
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 gateway_url() {
-    if [ "$1" = "lumen" ]; then echo "http://localhost:18080"; else echo "http://localhost:9080"; fi
+    if [ "$1" = "lumen" ]; then echo "http://localhost:18080"; else echo "$APISIX_PROXY_URL"; fi
 }
 
 # Start only the target gateway; stop the other to prevent resource contention.
@@ -114,7 +115,7 @@ run_scenario() {
         "$RESULTS_DIR/$gw/${scenario}_resources.csv" &
     RESOURCE_PID=$!
 
-    GATEWAY=$gw k6 run \
+    APISIX_BASE_URL="$APISIX_PROXY_URL" GATEWAY=$gw k6 run \
         --summary-export="$RESULTS_DIR/$gw/${scenario}_summary.json" \
         "$K6_DIR/${scenario}.js" 2>&1 | tee "$RESULTS_DIR/$gw/${scenario}_output.txt"
 
@@ -249,15 +250,21 @@ m = d.get('metrics', {})
 dur = m.get('http_req_duration', {})
 reqs = m.get('http_reqs', {})
 fails = m.get('http_req_failed', {})
-print(f\"  RPS:       {reqs.get('rate', 0):.1f}\")
-print(f\"  avg:       {dur.get('avg', 0):.2f} ms\")
-print(f\"  p50:       {dur.get('p(50)', 0):.2f} ms\")
-print(f\"  p75:       {dur.get('p(75)', 0):.2f} ms\")
-print(f\"  p90:       {dur.get('p(90)', 0):.2f} ms\")
-print(f\"  p95:       {dur.get('p(95)', 0):.2f} ms\")
-print(f\"  p99:       {dur.get('p(99)', 0):.2f} ms\")
-print(f\"  max:       {dur.get('max', 0):.2f} ms\")
-print(f\"  err rate:  {fails.get('rate', 0)*100:.2f}%\")
+
+def metric_value(metric, key, default=0):
+    values = metric.get('values', metric)
+    return values.get(key, default)
+
+err_rate = metric_value(fails, 'rate', metric_value(fails, 'value', 0))
+print(f\"  RPS:       {metric_value(reqs, 'rate'):.1f}\")
+print(f\"  avg:       {metric_value(dur, 'avg'):.2f} ms\")
+print(f\"  p50:       {metric_value(dur, 'p(50)'):.2f} ms\")
+print(f\"  p75:       {metric_value(dur, 'p(75)'):.2f} ms\")
+print(f\"  p90:       {metric_value(dur, 'p(90)'):.2f} ms\")
+print(f\"  p95:       {metric_value(dur, 'p(95)'):.2f} ms\")
+print(f\"  p99:       {metric_value(dur, 'p(99)'):.2f} ms\")
+print(f\"  max:       {metric_value(dur, 'max'):.2f} ms\")
+print(f\"  err rate:  {err_rate*100:.2f}%\")
 " 2>/dev/null || echo "  (check $summary manually)"
             fi
         fi

@@ -66,6 +66,21 @@ benchstat /tmp/lumen-router-before.txt /tmp/lumen-router-after.txt
 
 Implementation note: pure hostless exact/prefix route tables now use a pre-sorted fast path by route priority and path specificity. Mixed host or regex route tables keep the original full matcher to preserve behavior.
 
+### Proxy Allocation Optimization Round 1 (`internal/proxy`)
+Run Commands:
+```bash
+go test ./internal/proxy -bench=BenchmarkProxyServeHTTP -benchmem -count=8 -run=^$ > /tmp/lumen-proxy-before-labels.txt
+go test ./internal/proxy -bench=BenchmarkProxyServeHTTP -benchmem -count=8 -run=^$ > /tmp/lumen-proxy-after-pool.txt
+benchstat /tmp/lumen-proxy-before-labels.txt /tmp/lumen-proxy-after-pool.txt
+```
+
+| Benchmark Scenario | Before | After | Change | Memory Change |
+| :--- | :---: | :---: | :---: | :---: |
+| `BenchmarkProxyServeHTTP` | 5.872 us/op, 67 allocs/op | 5.707 us/op, 65 allocs/op | -2.81% latency, -2 allocs/op | 7.163 KiB/op -> 6.787 KiB/op |
+| `BenchmarkProxyServeHTTPWithBody` | 6.694 us/op, 72 allocs/op | 6.538 us/op, 70 allocs/op | -2.32% latency, -2 allocs/op | 11.33 KiB/op -> 10.94 KiB/op |
+
+Profiler diagnosis: the largest allocation source in proxy benchmarks was not `newUpstreamRequest` itself, but upstream observability label-key construction plus per-request trace timing state. The accepted change reuses `traceTimings` with `sync.Pool` and replaces hot-path status-class formatting with constant strings. A manual `http.Request` construction experiment reduced `BenchmarkNewUpstreamRequest` latency but regressed full `ServeHTTP`, so it was rejected.
+
 ---
 
 ## 2. Structure Field Alignment Analysis
@@ -94,6 +109,13 @@ The following structs contain padding waste due to suboptimal field order:
 | `internal/gateway/gateway.go:68:14` | `Service` runtime struct | `168 pointer bytes` $\to$ `144 pointer bytes` | Reduce 24 pointer bytes |
 | `internal/gateway/gateway.go:77:15` | `Upstream` runtime struct | `288 pointer bytes` $\to$ `264 pointer bytes` | Reduce 24 pointer bytes |
 
+Current focused scan after runtime struct reordering:
+```bash
+fieldalignment ./internal/gateway ./internal/config ./internal/plugin ./internal/proxy
+```
+
+`internal/gateway.Service`, `internal/gateway.Upstream`, and `internal/config.Options` no longer report padding opportunities. Remaining focused findings are limited to `internal/plugin.hertzPluginContext` and two test-only structs.
+
 ---
 
 ## 3. Escape Analysis & Heap Allocation Sources
@@ -105,11 +127,8 @@ go build -gcflags="-m -l" ./...
 
 ### Key Findings
 1. **Context Value Setting (`internal/plugin`)**:
-   - `SetContextValues` has 4 allocations per call because the values passed to context methods are wrapped in `any` interface values, causing them to escape to the heap.
+   - Current `BenchmarkSetContextValues` is `~35 ns/op`, `0 B/op`, `0 allocs/op`. The typed `hertzPluginContext` fast path avoids the earlier implicit `any` heap allocation.
 2. **Reverse Proxy request path (`internal/proxy`)**:
-   - `BenchmarkProxyServeHTTP` has 218 allocations per request, primarily due to:
-     - Header copying / merging.
-     - Upstream request creation (`newUpstreamRequest`).
-     - Request context wrapping.
+   - Current `BenchmarkProxyServeHTTP` is `65 allocs/op` after trace timing reuse. Remaining allocations primarily come from `httptrace.ClientTrace` closures, `net/http` request cloning/header handling, Hertz request/URI handling in the benchmark context, and response/header copying.
 3. **Bootstrapping and CLI configurations**:
    - CLI flags, configuration loading, and command creation (`*cli.Command` and `*cli.App`) escape to the heap, which is acceptable since it only happens during startup.

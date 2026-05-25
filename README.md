@@ -26,6 +26,10 @@ Lumen Gateway is a pure-Go L7 API gateway providing **low tail latency**, an **A
 
 Designed as a high-concurrency cloud-native data plane, Lumen Gateway features lock-free state synchronization, zero-allocation memory optimizations, and extensible middleware capabilities.
 
+> **Benchmark conclusion:** after the latest proxy hot-path optimization, Lumen Gateway's tail latency now beats APISIX across all benchmark scenarios: p95 is **48–59% lower** and p99 is **40–51% lower** under the same 2 CPU / 512 MB Docker limit. See [docs/benchmark/README.md](docs/benchmark/README.md) for the full APISIX comparison.
+>
+> **优化后尾延迟超过 APISIX**：在 passthrough、pipeline、ramp-up、spike 四组压测中，Lumen 的 p90/p95/p99 均低于 APISIX。
+
 ---
 
 ## Highlights

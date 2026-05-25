@@ -86,8 +86,8 @@ services:
       mock-server:
         condition: service_healthy
     ports:
-      - "9080:9080"
-      - "9180:9180"
+      - "${APISIX_PROXY_PORT:-9080}:9080"
+      - "${APISIX_ADMIN_PORT:-9180}:9180"
     volumes:
       # APISIX_CONFIG selects between config-passthrough.yaml (access_log off)
       # and config-pipeline.yaml (buffered access_log). run.sh sets this env var

@@ -440,8 +440,25 @@ func appendLabel(b *strings.Builder, first bool, key, value string) bool {
 	if !first {
 		b.WriteByte(',')
 	}
-	fmt.Fprintf(b, "%s=%q", key, value)
+	b.WriteString(key)
+	b.WriteString(`="`)
+	appendLabelValue(b, value)
+	b.WriteByte('"')
 	return false
+}
+
+func appendLabelValue(b *strings.Builder, value string) {
+	for i := 0; i < len(value); i++ {
+		switch value[i] {
+		case '\\', '"':
+			b.WriteByte('\\')
+			b.WriteByte(value[i])
+		case '\n':
+			b.WriteString(`\n`)
+		default:
+			b.WriteByte(value[i])
+		}
+	}
 }
 
 // renderLabelKey is the generic label renderer used by Stats() and tests.
@@ -460,7 +477,13 @@ func renderLabelKey(labels map[string]string) string {
 
 	parts := make([]string, 0, len(keys))
 	for _, key := range keys {
-		parts = append(parts, fmt.Sprintf("%s=%q", key, labels[key]))
+		var b strings.Builder
+		b.Grow(len(key) + len(labels[key]) + 3)
+		b.WriteString(key)
+		b.WriteString(`="`)
+		appendLabelValue(&b, labels[key])
+		b.WriteByte('"')
+		parts = append(parts, b.String())
 	}
 	return "{" + strings.Join(parts, ",") + "}"
 }

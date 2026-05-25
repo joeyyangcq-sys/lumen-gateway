@@ -1,6 +1,6 @@
 const GATEWAYS = {
     lumen: 'http://localhost:18080',
-    apisix: 'http://localhost:9080',
+    apisix: __ENV.APISIX_BASE_URL || 'http://localhost:9080',
 };
 
 export const BASE_URL = GATEWAYS[__ENV.GATEWAY] || GATEWAYS.lumen;

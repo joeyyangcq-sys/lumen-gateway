@@ -5,13 +5,13 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
-	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptrace"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cloudwego/hertz/pkg/app"
@@ -25,6 +25,12 @@ var (
 	ErrBadGateway    = errors.New("upstream request failed")
 	ErrTimeout       = errors.New("upstream request timed out")
 )
+
+var traceTimingsPool = sync.Pool{
+	New: func() any {
+		return new(traceTimings)
+	},
+}
 
 // hopByHopHeaders contains headers that must not be forwarded to the upstream
 // or downstream. Both Title-Case (canonical net/http form) and lowercase
@@ -102,6 +108,7 @@ func (p *HTTPProxy) ServeHTTP(ctx context.Context, c *app.RequestContext, target
 	}
 
 	timings := newTraceTimings(target)
+	defer releaseTraceTimings(timings)
 	req = req.WithContext(httptrace.WithClientTrace(req.Context(), timings.clientTrace()))
 	resp, err := p.client.Do(req)
 	timings.finishRoundTrip(err)
@@ -144,13 +151,6 @@ func newUpstreamRequest(ctx context.Context, c *app.RequestContext, target Targe
 		return nil, ErrInvalidTarget
 	}
 
-	uri := &url.URL{
-		Scheme:   scheme,
-		Host:     target.Address,
-		Path:     string(c.Path()),
-		RawQuery: string(c.Request.URI().QueryArgs().QueryString()),
-	}
-
 	body := io.Reader(nil)
 	contentLength := int64(0)
 	if c.Request.IsBodyStream() {
@@ -163,6 +163,13 @@ func newUpstreamRequest(ctx context.Context, c *app.RequestContext, target Targe
 	} else if raw := c.Request.Body(); len(raw) > 0 {
 		body = bytes.NewReader(raw)
 		contentLength = int64(len(raw))
+	}
+
+	uri := &url.URL{
+		Scheme:   scheme,
+		Host:     target.Address,
+		Path:     string(c.Path()),
+		RawQuery: string(c.Request.URI().QueryArgs().QueryString()),
 	}
 
 	req, err := http.NewRequestWithContext(ctx, string(c.Method()), uri.String(), body)
@@ -236,7 +243,8 @@ type traceTimings struct {
 }
 
 func newTraceTimings(target Target) *traceTimings {
-	return &traceTimings{
+	t := traceTimingsPool.Get().(*traceTimings)
+	*t = traceTimings{
 		target: observability.ProxyInfo{
 			Scheme:  target.Scheme,
 			Address: target.Address,
@@ -244,6 +252,12 @@ func newTraceTimings(target Target) *traceTimings {
 		},
 		start: time.Now(),
 	}
+	return t
+}
+
+func releaseTraceTimings(t *traceTimings) {
+	*t = traceTimings{}
+	traceTimingsPool.Put(t)
 }
 
 func (t *traceTimings) clientTrace() *httptrace.ClientTrace {
@@ -351,7 +365,7 @@ func recordUpstreamObservation(c *app.RequestContext, target Target, info observ
 
 	statusClass := ""
 	if status > 0 {
-		statusClass = fmt.Sprintf("%dxx", status/100)
+		statusClass = statusClassFor(status)
 	}
 
 	pc := plugin.FromRequestContext(c)
@@ -366,4 +380,21 @@ func recordUpstreamObservation(c *app.RequestContext, target Target, info observ
 		ErrorType:   errorType,
 		ReusedConn:  info.ReusedConnection,
 	}, info)
+}
+
+func statusClassFor(status int) string {
+	switch status / 100 {
+	case 1:
+		return "1xx"
+	case 2:
+		return "2xx"
+	case 3:
+		return "3xx"
+	case 4:
+		return "4xx"
+	case 5:
+		return "5xx"
+	default:
+		return ""
+	}
 }

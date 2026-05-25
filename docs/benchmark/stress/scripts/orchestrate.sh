@@ -38,6 +38,8 @@ declare -a SEED_TIMES=()
 declare -a MEMORY_VALS=()
 declare -a PROXY_RPS=()
 declare -a PROXY_P50=()
+declare -a PROXY_P75=()
+declare -a PROXY_P90=()
 declare -a PROXY_P95=()
 declare -a PROXY_P99=()
 declare -a PROXY_ERR=()
@@ -110,7 +112,8 @@ import json
 with open('${TIER_DIR}/proxy-latency.json') as f:
     d = json.load(f)
 m = d.get('metrics',{})
-rps = m.get('http_reqs',{}).get('values',{}).get('rate',0)
+rps_metric = m.get('http_reqs',{})
+rps = rps_metric.get('values', rps_metric).get('rate',0)
 print(f'{rps:.1f}')
 " 2>/dev/null || echo "N/A")
 
@@ -118,7 +121,26 @@ print(f'{rps:.1f}')
 import json
 with open('${TIER_DIR}/proxy-latency.json') as f:
     d = json.load(f)
-v = d.get('metrics',{}).get('http_req_duration',{}).get('values',{}).get('p(50)',0)
+metric = d.get('metrics',{}).get('http_req_duration',{})
+v = metric.get('values', metric).get('p(50)',0)
+print(f'{v:.2f}')
+" 2>/dev/null || echo "N/A")
+
+        P75=$(python3 -c "
+import json
+with open('${TIER_DIR}/proxy-latency.json') as f:
+    d = json.load(f)
+metric = d.get('metrics',{}).get('http_req_duration',{})
+v = metric.get('values', metric).get('p(75)',0)
+print(f'{v:.2f}')
+" 2>/dev/null || echo "N/A")
+
+        P90=$(python3 -c "
+import json
+with open('${TIER_DIR}/proxy-latency.json') as f:
+    d = json.load(f)
+metric = d.get('metrics',{}).get('http_req_duration',{})
+v = metric.get('values', metric).get('p(90)',0)
 print(f'{v:.2f}')
 " 2>/dev/null || echo "N/A")
 
@@ -126,7 +148,8 @@ print(f'{v:.2f}')
 import json
 with open('${TIER_DIR}/proxy-latency.json') as f:
     d = json.load(f)
-v = d.get('metrics',{}).get('http_req_duration',{}).get('values',{}).get('p(95)',0)
+metric = d.get('metrics',{}).get('http_req_duration',{})
+v = metric.get('values', metric).get('p(95)',0)
 print(f'{v:.2f}')
 " 2>/dev/null || echo "N/A")
 
@@ -134,7 +157,8 @@ print(f'{v:.2f}')
 import json
 with open('${TIER_DIR}/proxy-latency.json') as f:
     d = json.load(f)
-v = d.get('metrics',{}).get('http_req_duration',{}).get('values',{}).get('p(99)',0)
+metric = d.get('metrics',{}).get('http_req_duration',{})
+v = metric.get('values', metric).get('p(99)',0)
 print(f'{v:.2f}')
 " 2>/dev/null || echo "N/A")
 
@@ -149,12 +173,16 @@ print(f'{(1-rate)*100:.2f}%')
 
         PROXY_RPS+=("${RPS}")
         PROXY_P50+=("${P50}")
+        PROXY_P75+=("${P75}")
+        PROXY_P90+=("${P90}")
         PROXY_P95+=("${P95}")
         PROXY_P99+=("${P99}")
         PROXY_ERR+=("${ERR}")
     else
         PROXY_RPS+=("N/A")
         PROXY_P50+=("N/A")
+        PROXY_P75+=("N/A")
+        PROXY_P90+=("N/A")
         PROXY_P95+=("N/A")
         PROXY_P99+=("N/A")
         PROXY_ERR+=("N/A")
@@ -191,16 +219,18 @@ echo "" >> "${REPORT}"
 cat >> "${REPORT}" <<'TABLE_HEADER'
 ## Proxy Latency vs Route Count
 
-| Routes | Seed Time | RPS | p50 (ms) | p95 (ms) | p99 (ms) | Error Rate | Memory |
-|--------|-----------|-----|----------|----------|----------|------------|--------|
+| Routes | Seed Time | RPS | p50 (ms) | p75 (ms) | p90 (ms) | p95 (ms) | p99 (ms) | Error Rate | Memory |
+|--------|-----------|-----|----------|----------|----------|----------|----------|------------|--------|
 TABLE_HEADER
 
 for i in "${!TIER_LABELS[@]}"; do
-    printf "| %s | %ss | %s | %s | %s | %s | %s | %s |\n" \
+    printf "| %s | %ss | %s | %s | %s | %s | %s | %s | %s | %s |\n" \
         "${TIER_LABELS[$i]}" \
         "${SEED_TIMES[$i]}" \
         "${PROXY_RPS[$i]}" \
         "${PROXY_P50[$i]}" \
+        "${PROXY_P75[$i]}" \
+        "${PROXY_P90[$i]}" \
         "${PROXY_P95[$i]}" \
         "${PROXY_P99[$i]}" \
         "${PROXY_ERR[$i]}" \

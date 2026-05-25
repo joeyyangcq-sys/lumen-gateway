@@ -13,7 +13,8 @@ info()  { echo -e "${GREEN}[INFO]${NC} $*"; }
 warn()  { echo -e "${YELLOW}[WARN]${NC} $*"; }
 fail()  { echo -e "${RED}[FAIL]${NC} $*"; exit 1; }
 
-APISIX_ADMIN="http://localhost:9180"
+APISIX_PROXY_URL="${APISIX_PROXY_URL:-http://localhost:${APISIX_PROXY_PORT:-9080}}"
+APISIX_ADMIN="${APISIX_ADMIN:-http://localhost:${APISIX_ADMIN_PORT:-9180}}"
 APISIX_KEY="benchmark-admin-key"
 
 # ── Step 1: Check prerequisites ──────────────────────────────────────────────
@@ -120,13 +121,13 @@ else
     fail "lumen-gateway /benchmark/pipeline verification failed"
 fi
 
-if curl -sf http://localhost:9080/benchmark/echo >/dev/null 2>&1; then
+if curl -sf "$APISIX_PROXY_URL/benchmark/echo" >/dev/null 2>&1; then
     info "APISIX proxy verified: /benchmark/echo -> mock-server"
 else
     fail "APISIX /benchmark/echo verification failed"
 fi
 
-if curl -sf http://localhost:9080/benchmark/pipeline >/dev/null 2>&1; then
+if curl -sf "$APISIX_PROXY_URL/benchmark/pipeline" >/dev/null 2>&1; then
     info "APISIX proxy verified: /benchmark/pipeline -> mock-server"
 else
     fail "APISIX /benchmark/pipeline verification failed"
@@ -141,8 +142,8 @@ info "  lumen-gateway:"
 info "    passthrough route: http://localhost:18080/benchmark/echo"
 info "    pipeline route:    http://localhost:18080/benchmark/pipeline"
 info "  APISIX:"
-info "    passthrough route: http://localhost:9080/benchmark/echo"
-info "    pipeline route:    http://localhost:9080/benchmark/pipeline"
+info "    passthrough route: $APISIX_PROXY_URL/benchmark/echo"
+info "    pipeline route:    $APISIX_PROXY_URL/benchmark/pipeline"
 echo ""
 info "Run benchmarks with: bash $SCRIPT_DIR/run.sh"
 info "Tear down with: docker compose -f $BENCH_DIR/docker-compose.yml down -v"
