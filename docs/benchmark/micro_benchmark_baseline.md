@@ -49,6 +49,23 @@ Run Command:
 | `BenchmarkRouterMatchExact` | 56,090,271 | 21.630 | 0 | 0 |
 | `BenchmarkRouterMatchRegex` | 13,332,561 | 90.070 | 0 | 0 |
 
+### Router Matching Optimization Round 1 (`internal/router`)
+Run Commands:
+```bash
+go test ./internal/router -bench=BenchmarkRouterMatch -benchmem -count=10 -run=^$ > /tmp/lumen-router-before.txt
+go test ./internal/router -bench=BenchmarkRouterMatch -benchmem -count=10 -run=^$ > /tmp/lumen-router-after.txt
+benchstat /tmp/lumen-router-before.txt /tmp/lumen-router-after.txt
+```
+
+| Benchmark Scenario | Before | After | Change | Memory |
+| :--- | :---: | :---: | :---: | :---: |
+| `BenchmarkRouterMatch100` | 1,206.0 ns/op | 334.4 ns/op | -72.28% | 0 B/op, 0 allocs/op |
+| `BenchmarkRouterMatch1000` | 13.332 us/op | 3.186 us/op | -76.11% | 0 B/op, 0 allocs/op |
+| `BenchmarkRouterMatchExact` | 21.41 ns/op | 12.21 ns/op | -42.98% | 0 B/op, 0 allocs/op |
+| `BenchmarkRouterMatchRegex` | 90.77 ns/op | 89.50 ns/op | -1.39% | 0 B/op, 0 allocs/op |
+
+Implementation note: pure hostless exact/prefix route tables now use a pre-sorted fast path by route priority and path specificity. Mixed host or regex route tables keep the original full matcher to preserve behavior.
+
 ---
 
 ## 2. Structure Field Alignment Analysis

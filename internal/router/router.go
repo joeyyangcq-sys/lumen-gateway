@@ -4,18 +4,23 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/joey/lumen-gateway/internal/config"
 )
 
 type Router struct {
-	routes []compiledRoute
+	routes      []compiledRoute
+	fastRoutes  []fastRoute
+	fastEnabled bool
 }
 
 func New() *Router {
 	return &Router{
-		routes: make([]compiledRoute, 0),
+		routes:      make([]compiledRoute, 0),
+		fastRoutes:  make([]fastRoute, 0),
+		fastEnabled: true,
 	}
 }
 
@@ -30,11 +35,16 @@ func (r *Router) Add(route config.RouteOptions) error {
 	}
 
 	r.routes = append(r.routes, compiled)
+	r.rebuildFastRoutes()
 	return nil
 }
 
 func (r *Router) Match(method, host, path string) (config.RouteOptions, bool) {
 	method = strings.ToUpper(method)
+	if r.fastEnabled && host == "" {
+		return r.matchFast(method, path)
+	}
+
 	var (
 		bestRoute config.RouteOptions
 		bestScore int
@@ -66,6 +76,25 @@ func (r *Router) Match(method, host, path string) (config.RouteOptions, bool) {
 		}
 	}
 	return bestRoute, found
+}
+
+func (r *Router) matchFast(method, path string) (config.RouteOptions, bool) {
+	for _, entry := range r.fastRoutes {
+		if entry.method != "" && entry.method != method {
+			continue
+		}
+		switch entry.kind {
+		case pathExact:
+			if path == entry.path {
+				return r.routes[entry.routeIndex].route, true
+			}
+		case pathPrefix:
+			if path == entry.path || strings.HasPrefix(path, entry.path) {
+				return r.routes[entry.routeIndex].route, true
+			}
+		}
+	}
+	return config.RouteOptions{}, false
 }
 
 func matchMethod(methods []string, method string) bool {
@@ -150,6 +179,83 @@ type compiledPath struct {
 type compiledRoute struct {
 	route config.RouteOptions
 	paths []compiledPath
+}
+
+type fastRoute struct {
+	path       string
+	method     string
+	score      int
+	routeIndex int
+	order      int
+	kind       pathKind
+}
+
+func (r *Router) rebuildFastRoutes() {
+	fastRoutes := make([]fastRoute, 0, len(r.routes))
+	for routeIndex, entry := range r.routes {
+		route := entry.route
+		if len(route.Hosts) != 0 {
+			r.fastEnabled = false
+			r.fastRoutes = nil
+			return
+		}
+		for _, path := range entry.paths {
+			if path.kind == pathRegex {
+				r.fastEnabled = false
+				r.fastRoutes = nil
+				return
+			}
+			score := route.Priority*1_000_000 + path.score()
+			if len(route.Methods) == 0 {
+				fastRoutes = append(fastRoutes, fastRoute{
+					path:       path.matchTarget(),
+					score:      score,
+					routeIndex: routeIndex,
+					order:      len(fastRoutes),
+					kind:       path.kind,
+				})
+				continue
+			}
+			for _, method := range route.Methods {
+				fastRoutes = append(fastRoutes, fastRoute{
+					path:       path.matchTarget(),
+					method:     strings.ToUpper(method),
+					score:      score,
+					routeIndex: routeIndex,
+					order:      len(fastRoutes),
+					kind:       path.kind,
+				})
+			}
+		}
+	}
+	slices.SortStableFunc(fastRoutes, func(a, b fastRoute) int {
+		if a.score != b.score {
+			return b.score - a.score
+		}
+		return a.order - b.order
+	})
+	r.fastRoutes = fastRoutes
+	r.fastEnabled = true
+}
+
+func (p compiledPath) score() int {
+	switch p.kind {
+	case pathExact:
+		return 300_000 + p.specificity
+	case pathRegex:
+		return 200_000 + p.specificity
+	case pathPrefix:
+		return 100_000 + p.specificity
+	default:
+		return 0
+	}
+}
+
+func (p compiledPath) matchTarget() string {
+	if p.kind == pathExact {
+		return p.exact
+	}
+	return p.prefix
 }
 
 func compileRoute(route config.RouteOptions) (compiledRoute, error) {

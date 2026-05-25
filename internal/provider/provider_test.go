@@ -185,6 +185,29 @@ func TestEtcdApisixSourceLoad(t *testing.T) {
 	}
 }
 
+func TestEtcdApisixSourceLoadUsesConfiguredTimeout(t *testing.T) {
+	mockClient := &mockEtcdKVClient{
+		getFunc: func(ctx context.Context, key string, opts ...clientv3.OpOption) (*clientv3.GetResponse, error) {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+	}
+	s := &etcdApisixSource{
+		client:      mockClient,
+		prefix:      "/apisix",
+		loadTimeout: 5 * time.Millisecond,
+	}
+
+	startedAt := time.Now()
+	_, err := s.Load(context.Background())
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Load() error = %v, want context deadline exceeded", err)
+	}
+	if elapsed := time.Since(startedAt); elapsed > time.Second {
+		t.Fatalf("Load() elapsed = %s, want short timeout", elapsed)
+	}
+}
+
 func TestEtcdApisixSourceWatch(t *testing.T) {
 	watchCh := make(chan clientv3.WatchResponse, 5)
 	mockClient := &mockEtcdKVClient{
@@ -257,7 +280,7 @@ func TestEtcdApisixSourceWatch(t *testing.T) {
 	if err := sleepContext(ctx, 0); err != nil {
 		t.Errorf("expected no error for 0 sleep, got %v", err)
 	}
-	
+
 	// Test close
 	cancel()
 	_ = s.Close()
@@ -280,7 +303,6 @@ func TestNewSourceEtcd(t *testing.T) {
 		t.Errorf("expected *etcdApisixSource, got %T", s)
 	}
 }
-
 
 func TestNormalizePrefix(t *testing.T) {
 	tests := []struct {
@@ -401,5 +423,3 @@ func TestEtcdApisixSourceApplyKVErrorPaths(t *testing.T) {
 		t.Errorf("expected nil error for invalid kind, got %v", err)
 	}
 }
-
-

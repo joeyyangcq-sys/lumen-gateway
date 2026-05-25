@@ -67,10 +67,11 @@ type etcdKVClient interface {
 }
 
 type etcdApisixSource struct {
-	client     etcdKVClient
-	prefix     string
-	listen     string
-	retryDelay time.Duration
+	client      etcdKVClient
+	prefix      string
+	listen      string
+	loadTimeout time.Duration
+	retryDelay  time.Duration
 }
 
 func newEtcdApisixSource(boot bootstrap.Options) (Source, error) {
@@ -85,19 +86,36 @@ func newEtcdApisixSource(boot bootstrap.Options) (Source, error) {
 	}
 
 	return &etcdApisixSource{
-		client: client,
-		prefix: normalizePrefix(boot.Etcd.Prefix),
-		listen: boot.Gateway.Listen,
+		client:      client,
+		prefix:      normalizePrefix(boot.Etcd.Prefix),
+		listen:      boot.Gateway.Listen,
+		loadTimeout: boot.Etcd.DialTimeout,
 	}, nil
 }
 
 func (s *etcdApisixSource) Load(ctx context.Context) (config.Options, error) {
+	var cancel context.CancelFunc
+	ctx, cancel = s.loadContext(ctx)
+	if cancel != nil {
+		defer cancel()
+	}
+
 	options, err := s.loadOptions(ctx)
 	if err != nil {
 		return config.Options{}, err
 	}
 	applyListenOverride(&options, s.listen)
 	return options, nil
+}
+
+func (s *etcdApisixSource) loadContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if _, ok := ctx.Deadline(); ok || s.loadTimeout <= 0 {
+		return ctx, nil
+	}
+	return context.WithTimeout(ctx, s.loadTimeout)
 }
 
 func (s *etcdApisixSource) Watch(ctx context.Context, onUpdate func(Update)) error {

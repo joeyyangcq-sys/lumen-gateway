@@ -48,6 +48,52 @@ func TestRouterExactPathDoesNotMatchPrefix(t *testing.T) {
 	}
 }
 
+func TestRouterFastPathPreservesPrioritySpecificityAndMethod(t *testing.T) {
+	r := New()
+	if err := r.Add(config.RouteOptions{
+		ID:       "specific-post",
+		Methods:  []string{"POST"},
+		Paths:    []string{"= /api/users"},
+		Service:  "svc",
+		Priority: 0,
+	}); err != nil {
+		t.Fatalf("Add() error = %v", err)
+	}
+	if err := r.Add(config.RouteOptions{
+		ID:       "priority-prefix",
+		Methods:  []string{"GET"},
+		Paths:    []string{"/api"},
+		Service:  "svc",
+		Priority: 1,
+	}); err != nil {
+		t.Fatalf("Add() error = %v", err)
+	}
+	if err := r.Add(config.RouteOptions{
+		ID:      "specific-prefix",
+		Methods: []string{"GET"},
+		Paths:   []string{"/api/users"},
+		Service: "svc",
+	}); err != nil {
+		t.Fatalf("Add() error = %v", err)
+	}
+
+	route, ok := r.Match("get", "", "/api/users")
+	if !ok {
+		t.Fatal("Match() ok = false, want true")
+	}
+	if route.ID != "priority-prefix" {
+		t.Fatalf("Match() route.ID = %q, want priority-prefix", route.ID)
+	}
+
+	route, ok = r.Match("POST", "", "/api/users")
+	if !ok {
+		t.Fatal("Match() ok = false, want true")
+	}
+	if route.ID != "specific-post" {
+		t.Fatalf("Match() route.ID = %q, want specific-post", route.ID)
+	}
+}
+
 func TestRouterRejectsEmptyRouteID(t *testing.T) {
 	r := New()
 	if err := r.Add(config.RouteOptions{Paths: []string{"/"}}); err == nil {
@@ -161,4 +207,3 @@ func TestRouterCompileErrors(t *testing.T) {
 		t.Error("expected error for empty regex 3")
 	}
 }
-
